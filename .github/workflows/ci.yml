@@ -1,0 +1,29 @@
+name: blend-rs CI
+
+on:
+  push:
+    branches: [master]
+    paths: [blend-rs/**]
+  pull_request:
+    paths: [blend-rs/**]
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: blend-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: blend-rs
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
