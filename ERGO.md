@@ -106,14 +106,16 @@ These friction points from the original analysis have been addressed by `blend s
 
 | # | Issue | Severity | Detail |
 |---|-------|----------|--------|
-| 1 | **Per-field granularity** | Medium | Sync operates per-file, not per-field. Can't accept some fields and reject others within a single file |
+| 1 | **~~Per-field granularity~~** | ~~Medium~~ | **Resolved** — Per-key interactive sync for `from_config` entries: `[p]ush p[u]ll [s]kip [a]ll-push a[l]l-pull [q]uit` per changed key |
 | 2 | **Discovering which fields to `ignore`** | Low | Fields that apps frequently auto-update (zoom levels, timestamps) cause noisy diffs. Finding which to ignore is trial-and-error |
 | 3 | **No watch/auto-detect mode** | Low | Can't monitor deployed configs for changes and notify/prompt. Must manually check `blend` status |
 | 4 | **Non-rewritable fields info display** | Low | When `--no-rewrite` is active or a field can't be auto-pulled, the info display (branch context + Nickel snippet) is not yet fully implemented |
+| 5 | **Surgical rewrite can't add/delete keys** | Medium | Per-key pull of a key that exists in deployed but not in the `.ncl` (shown as `-` in diff) silently fails — the key isn't inserted into the `.ncl`. Similarly, pulling a key deletion (key in `.ncl` but not deployed) can't remove it from the `.ncl`. The AST span-based rewrite only supports modifying existing leaf values, not inserting/deleting record fields. Users must manually edit the `.ncl` for these cases. |
 
 ### Improvement Ideas
 
-- Per-field interactive sync (show each changed key individually, not just per-file)
+- Surgical rewrite key insertion: when pulling a new key from deployed, insert a new field into the Nickel record at the correct position
+- Surgical rewrite key deletion: when pulling a removal, delete the field from the Nickel record (including trailing comma handling)
 - Suggest ignore patterns: when a field keeps changing across consecutive syncs, suggest adding it to `ignore`
 - Watch mode: monitor deployed configs, auto-run `blend sync` or notify on changes
 
@@ -156,12 +158,12 @@ These friction points from the original analysis have been addressed by `blend s
 3. **`blend check` command**: Validate all order.ncl files without deploying
 
 ### Medium Effort
-4. **`blend add <name> [--from <path>]`**: Scaffold new packages with auto-import (can reuse existing `json_to_nickel()` for format conversion)
+4. **`blend add <name> [--from <path>]`**: Scaffold new packages with auto-import from existing deployed configs (can reuse existing `json_to_nickel()` for format conversion). This covers the "capture existing config into a new order" use case — currently there's no way to pull a config from the filesystem into a new order without manual setup.
 5. **`--no-rewrite` info display**: Show branch context and Nickel snippets for manual merge
 6. **Suggest ignore patterns**: Auto-detect frequently changing fields
 
 ### Larger Effort
-7. **Per-field interactive sync**: Accept/reject individual field changes within a file
+7. ~~**Per-field interactive sync**~~: **Implemented** — per-key sync for `from_config` entries
 8. **Pre-sync backups + rollback**: Safety net for force deployments
 9. **Pre-built binary distribution**: GitHub releases or cargo-binstall support
 

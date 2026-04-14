@@ -10,7 +10,11 @@ impl FormatRenderer for JsonRenderer {
     }
 
     fn parse(&self, content: &str) -> Result<serde_json::Value> {
-        serde_json::from_str(content).context("Failed to parse JSON")
+        // Try standard JSON first, fall back to JSONC (strips comments + trailing commas)
+        match serde_json::from_str(content) {
+            Ok(v) => Ok(v),
+            Err(_) => super::jsonc::parse_jsonc(content),
+        }
     }
 }
 

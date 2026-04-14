@@ -1,5 +1,6 @@
 mod delimited;
 mod json;
+mod jsonc;
 mod plaintext;
 mod toml;
 
@@ -9,6 +10,7 @@ pub use self::delimited::{
     EqualDelimitedRecordRenderer, SpaceDelimitedPairsRenderer, SpaceDelimitedRecordRenderer,
 };
 pub use self::json::JsonRenderer;
+pub use self::jsonc::JsoncRenderer;
 pub use self::plaintext::PlaintextRenderer;
 pub use self::toml::TomlRenderer;
 
@@ -32,6 +34,7 @@ pub fn get_renderer(format: Format) -> Box<dyn FormatRenderer> {
         Format::SpaceDelimitedPairs => Box::new(SpaceDelimitedPairsRenderer),
         Format::SpaceDelimitedRecord => Box::new(SpaceDelimitedRecordRenderer),
         Format::EqualDelimitedRecord => Box::new(EqualDelimitedRecordRenderer),
+        Format::Jsonc => Box::new(JsoncRenderer),
         Format::Plaintext => Box::new(PlaintextRenderer),
     }
 }

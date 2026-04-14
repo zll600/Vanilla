@@ -14,17 +14,16 @@ return {
     -- light
     -- color_scheme = 'Spring',
     -- color_scheme = 'Tango',
-    color_scheme = 'Tokyo Night',
     colors = {
         -- GitHub colors
         -- https://www.npmjs.com/package/@primer/primitives?activeTab=code
         -- find proper `ansi` key
 
         -- dark
-        -- background = '#0a0a0a',
-        -- foreground = '#cecfcf'
-        -- ansi = {'#24292f', '#ff8182', '#4ac26b', "#d4a72c", "#54aeff", "#c297ff", "#76e3ea", '#d0d7de'},
-        -- brights = {'#32383f', '#ffaba8', '#6fdd8b', "#eac54f", "#80ccff", "#d8b9ff", "#b3f0ff", '#d0d7de'}
+        background = '#0a0a0a',
+        foreground = '#cecfcf',
+        ansi = {'#24292f', '#ff8182', '#4ac26b', "#d4a72c", "#54aeff", "#c297ff", "#76e3ea", '#d0d7de'},
+        brights = {'#32383f', '#ffaba8', '#6fdd8b', "#eac54f", "#80ccff", "#d8b9ff", "#b3f0ff", '#d0d7de'}
 
         -- light
         -- background = '#fafbf9',
@@ -35,6 +34,6 @@ return {
 
     font = wezterm.font 'JetBrains Mono',
     window_background_opacity = 0.64,
-    --    enable_tab_bar = false,
+--    enable_tab_bar = false,
     hide_tab_bar_if_only_one_tab = true
 }

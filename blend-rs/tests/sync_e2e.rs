@@ -702,3 +702,255 @@ fn test_sync_push_error_malformed_ncl() {
         "Should report error for malformed ncl:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Unexpected symlink detection and replacement tests
+// ---------------------------------------------------------------------------
+
+/// Helper: create a symlink at `link` pointing to `target`.
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) {
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_sync_push_replaces_symlink_with_real_file() {
+    // Simulate a stow-style symlink: target is a symlink to a file with matching content.
+    // `blend sync --push` should replace the symlink with a real file.
+    let home = TempDir::new().unwrap();
+    let orders = fixtures_dir().join("orders");
+
+    // First, create a real file elsewhere with the same content that blend would deploy
+    let stow_dir = TempDir::new().unwrap();
+    let stow_file = stow_dir.path().join("config.txt");
+
+    // Read the source file content to know what blend would deploy
+    let source_content =
+        std::fs::read_to_string(fixtures_dir().join("orders/test-file/config.txt")).unwrap();
+    std::fs::write(&stow_file, &source_content).unwrap();
+
+    // Create a symlink at the target location pointing to the stow file
+    let target = home.path().join(".config/test-file/config.txt");
+    create_symlink(&stow_file, &target);
+
+    // Verify it's a symlink with matching content
+    assert!(target.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), source_content);
+
+    // Sync --push should detect the symlink mismatch and replace it
+    let output = run_blend(home.path(), &orders, &["sync", "--push", "test-file"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "sync --push failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The target should now be a real file, not a symlink
+    assert!(
+        !target.symlink_metadata().unwrap().file_type().is_symlink(),
+        "Target should no longer be a symlink"
+    );
+
+    // Content should still match
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), source_content);
+
+    // Output should mention re-deployment
+    assert!(
+        stdout.contains("Re-deployed") || stdout.contains("replaced symlink"),
+        "Should mention re-deployment in output:\n{stdout}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_sync_push_replaces_symlinked_directory() {
+    // Test that a symlinked directory target also gets replaced with a real directory.
+    // We use test-file which has a from_file entry pointing to a single file,
+    // but we need to test with a from_config entry too.
+    let home = TempDir::new().unwrap();
+    let orders = fixtures_dir().join("orders");
+
+    // For from_config (structured) entries: test-plain has from_config
+    // First, render to know the expected content
+    let output = run_blend(home.path(), &orders, &["sync", "--push", "test-plain"]);
+    assert!(output.status.success());
+
+    let target = home.path().join(".config/test-plain/config.toml");
+    let expected_content = std::fs::read_to_string(&target).unwrap();
+
+    // Now remove the target and replace with a symlink to a file with same content
+    let stow_dir = TempDir::new().unwrap();
+    let stow_file = stow_dir.path().join("config.toml");
+    std::fs::write(&stow_file, &expected_content).unwrap();
+    std::fs::remove_file(&target).unwrap();
+    create_symlink(&stow_file, &target);
+
+    assert!(target.symlink_metadata().unwrap().file_type().is_symlink());
+
+    // Sync --push should replace the symlink
+    let output = run_blend(home.path(), &orders, &["sync", "--push", "test-plain"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "sync --push failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Should be a real file now
+    assert!(
+        !target.symlink_metadata().unwrap().file_type().is_symlink(),
+        "Target should no longer be a symlink"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), expected_content);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_view_shows_symlink_annotation() {
+    // When a target is a symlink but the order doesn't specify symlink=true,
+    // `blend view` should show a "(symlinked, needs re-deploy)" annotation.
+    let home = TempDir::new().unwrap();
+    let orders = fixtures_dir().join("orders");
+
+    // Deploy normally first
+    run_blend(home.path(), &orders, &["sync", "--push", "test-file"]);
+
+    let target = home.path().join(".config/test-file/config.txt");
+    let content = std::fs::read_to_string(&target).unwrap();
+
+    // Replace with a symlink to a file with same content
+    let stow_dir = TempDir::new().unwrap();
+    let stow_file = stow_dir.path().join("config.txt");
+    std::fs::write(&stow_file, &content).unwrap();
+    std::fs::remove_file(&target).unwrap();
+    create_symlink(&stow_file, &target);
+
+    // View should show the symlink annotation
+    let output = run_blend(home.path(), &orders, &["view", "test-file"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "view failed:\n{}\n{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("symlinked, needs re-deploy"),
+        "Should show symlink annotation in view output:\n{stdout}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_sync_interactive_replaces_symlink_automatically() {
+    // In interactive mode with no content changes, unexpected symlinks should
+    // be auto-redeployed without prompting.
+    let home = TempDir::new().unwrap();
+    let orders = fixtures_dir().join("orders");
+
+    // Deploy normally
+    run_blend(home.path(), &orders, &["sync", "--push", "test-file"]);
+
+    let target = home.path().join(".config/test-file/config.txt");
+    let content = std::fs::read_to_string(&target).unwrap();
+
+    // Replace with symlink
+    let stow_dir = TempDir::new().unwrap();
+    let stow_file = stow_dir.path().join("config.txt");
+    std::fs::write(&stow_file, &content).unwrap();
+    std::fs::remove_file(&target).unwrap();
+    create_symlink(&stow_file, &target);
+
+    // Run sync without --push (interactive mode), but since there's no content
+    // diff, the symlink replacement should happen automatically without prompting.
+    // (No stdin needed because we don't reach the prompt.)
+    let output = run_blend(home.path(), &orders, &["sync", "test-file"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "sync failed:\n{}\n{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Should now be a real file
+    assert!(
+        !target.symlink_metadata().unwrap().file_type().is_symlink(),
+        "Target should no longer be a symlink after interactive sync"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_sync_dry_run_detects_symlink_but_does_not_replace() {
+    let home = TempDir::new().unwrap();
+    let orders = fixtures_dir().join("orders");
+
+    // Deploy normally
+    run_blend(home.path(), &orders, &["sync", "--push", "test-file"]);
+
+    let target = home.path().join(".config/test-file/config.txt");
+    let content = std::fs::read_to_string(&target).unwrap();
+
+    // Replace with symlink
+    let stow_dir = TempDir::new().unwrap();
+    let stow_file = stow_dir.path().join("config.txt");
+    std::fs::write(&stow_file, &content).unwrap();
+    std::fs::remove_file(&target).unwrap();
+    create_symlink(&stow_file, &target);
+
+    // Dry run should detect but not modify
+    let output = run_blend(home.path(), &orders, &["sync", "--push", "-n", "test-file"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("symlinked") || stdout.contains("re-deploy"),
+        "Dry run should mention symlink mismatch:\n{stdout}"
+    );
+
+    // Should still be a symlink
+    assert!(
+        target.symlink_metadata().unwrap().file_type().is_symlink(),
+        "Dry run should not modify the symlink"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_status_shows_symlink_mismatch() {
+    let home = TempDir::new().unwrap();
+    let orders = fixtures_dir().join("orders");
+
+    // Deploy normally
+    run_blend(home.path(), &orders, &["sync", "--push", "test-file"]);
+
+    let target = home.path().join(".config/test-file/config.txt");
+    let content = std::fs::read_to_string(&target).unwrap();
+
+    // Replace with symlink
+    let stow_dir = TempDir::new().unwrap();
+    let stow_file = stow_dir.path().join("config.txt");
+    std::fs::write(&stow_file, &content).unwrap();
+    std::fs::remove_file(&target).unwrap();
+    create_symlink(&stow_file, &target);
+
+    // Status should show "symlinked" status
+    let output = run_blend(home.path(), &orders, &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("symlinked"),
+        "Status should show 'symlinked' for unexpected symlink target:\n{stdout}"
+    );
+}

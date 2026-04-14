@@ -10,6 +10,7 @@ pub enum Format {
     #[default]
     Toml,
     Json,
+    Jsonc,
     Yaml,
     SpaceDelimitedPairs,
     SpaceDelimitedRecord,
@@ -22,6 +23,8 @@ impl Format {
     pub fn from_path(path: &str) -> Self {
         if path.ends_with(".toml") {
             Format::Toml
+        } else if path.ends_with(".jsonc") {
+            Format::Jsonc
         } else if path.ends_with(".json") {
             Format::Json
         } else if path.ends_with(".yaml") || path.ends_with(".yml") {
@@ -86,6 +89,15 @@ pub struct FileEntry {
     /// Create symlink instead of copying (from_file only)
     #[serde(default)]
     pub symlink: bool,
+    /// Glob patterns to exclude when shipping a from_file directory
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Path to a local overlay directory (gitignored) that overrides/extends
+    /// the main from_file directory. Only valid for directory from_file entries.
+    pub local: Option<String>,
+    /// Set OS immutable flag on the deployed file after writing
+    #[serde(default)]
+    pub immutable: bool,
 }
 
 impl FileEntry {
@@ -106,6 +118,9 @@ impl FileEntry {
         }
         if self.symlink && self.from_config.is_some() {
             bail!("'symlink' can only be used with 'from_file', not 'from_config'");
+        }
+        if self.local.is_some() && self.from_file.is_none() {
+            bail!("'local' can only be used with 'from_file', not 'from_config'");
         }
         if self.name.is_empty() {
             if let Some(from_file) = &self.from_file {
@@ -244,6 +259,9 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: false,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
 
         // Local prefix takes precedence over global
@@ -265,6 +283,9 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: false,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
 
         let global_prefix = vec!["~/global/".to_string()];
@@ -284,6 +305,9 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: false,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
         entry.resolve_defaults().unwrap();
         assert_eq!(entry.name, "nvim");
@@ -300,6 +324,9 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: false,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
         assert!(entry.resolve_defaults().is_err());
     }
@@ -315,6 +342,9 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: false,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
         assert!(entry.resolve_defaults().is_err());
     }
@@ -330,6 +360,9 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: false,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
         assert!(entry.resolve_defaults().is_err());
     }
@@ -345,6 +378,9 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: true,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
         assert!(entry.resolve_defaults().is_err());
     }
@@ -360,8 +396,48 @@ mod tests {
             ignore: vec![],
             when: None,
             symlink: true,
+            exclude: vec![],
+            local: None,
+            immutable: false,
         };
         entry.resolve_defaults().unwrap();
         assert_eq!(entry.name, "bin");
+    }
+
+    #[test]
+    fn test_resolve_defaults_local_with_from_config_errors() {
+        let mut entry = FileEntry {
+            name: "test".to_string(),
+            from_file: None,
+            from_config: Some(serde_json::json!({})),
+            prefix: vec![],
+            format: None,
+            ignore: vec![],
+            when: None,
+            symlink: false,
+            exclude: vec![],
+            local: Some("test.local".to_string()),
+            immutable: false,
+        };
+        assert!(entry.resolve_defaults().is_err());
+    }
+
+    #[test]
+    fn test_resolve_defaults_local_with_from_file_ok() {
+        let mut entry = FileEntry {
+            name: String::new(),
+            from_file: Some("elvish".to_string()),
+            from_config: None,
+            prefix: vec![],
+            format: None,
+            ignore: vec![],
+            when: None,
+            symlink: false,
+            exclude: vec![],
+            local: Some("elvish.local".to_string()),
+            immutable: false,
+        };
+        entry.resolve_defaults().unwrap();
+        assert_eq!(entry.name, "elvish");
     }
 }

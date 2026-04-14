@@ -16,7 +16,7 @@ Vanilla is a cross-platform dotfiles manager. The core tool is **blend-rs** (Rus
 
 ## Migration Status
 
-The legacy nushell-based blend + `packages/` folder is being migrated to Rust-based `orders/` using Nickel DSL. Migration is in progress on branch `dev/new-blend`.
+The legacy nushell-based blend + `packages/` folder is being migrated to Rust-based `orders/` using Nickel DSL. Active development branch is `dev/brand-new-blend`.
 
 **Critical guardrail:** The `packages/` directory must remain untouched until migration is complete. All new configuration work goes into `orders/` as `.ncl` files.
 
@@ -30,11 +30,10 @@ cargo build --release    # inside blend-rs/
 ```
 
 **CLI commands:**
-- `ship [packages...]` — Generate and deploy configs to target locations
-- `view [packages...]` — Preview generated config and diff from deployed
-- `sample [packages...]` — Capture deployed config as reference (reverse of ship)
+- `sync [packages...]` — Bidirectional sync: push repo configs to targets or pull deployed changes back (`--push`, `--pull`, `--no-rewrite`)
+- `view [packages...]` — Preview generated config and diff from deployed (`-c` content only, `-a` all)
 - `table` — Output package info as HTML table (for README generation)
-- `upgrade [step]` — System upgrade: update packages, tools, and dotfiles
+- `upgrade [step]` — System upgrade: update packages, tools, and dotfiles (alias: `s`)
 
 **Global flags:** `--dry-run` (`-n`), `--verbose` (`-v`), `--home`, `--orders`
 

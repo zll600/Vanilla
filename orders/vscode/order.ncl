@@ -1,5 +1,4 @@
 # VSCode settings configuration
-
 let { Order, .. } = import "../order.contract.ncl" in
 {
   blend = {
@@ -7,19 +6,24 @@ let { Order, .. } = import "../order.contract.ncl" in
     files = [
       {
         name = "settings.json",
-        format = "json",
-        # Dynamic settings that may change locally
+        format = "jsonc",
+        # These settings are not suitable for sync.
         ignore = [
           "window.zoomLevel",
           "workbench.colorTheme",
           "workbench.iconTheme",
           "playwright.env",
+          "chat.commandCenter.enabled",
         ],
         from_config = {
           # Editor settings
           "editor.fontSize" = 13,
-          "editor.fontFamily" = "JetBrains Mono, Monaspace Argon Var, Fantasque Sans Mono, monospace, Electroharmonix",
+          "editor.fontFamily" = "JetBrainsMono Nerd Font Mono, JetBrains Mono, Monaspace Argon Var, Fantasque Sans Mono, monospace, Electroharmonix",
+          # JetBrains Mono
+          # https://github.com/JetBrains/JetBrainsMono/wiki/OpenType-features
           "editor.fontLigatures" = "'calt', 'zero', 'ss02', 'cv14'",
+          # Monaspace
+          # "editor.fontLigatures" = "'calt', 'liga', 'dlig', 'ss01', 'ss02', 'ss03', 'ss04', 'ss05', 'ss06', 'ss07', 'ss08'",
           "editor.formatOnSave" = true,
           "editor.formatOnType" = false,
           "editor.tabSize" = 2,
@@ -63,6 +67,7 @@ let { Order, .. } = import "../order.contract.ncl" in
           "workbench.sideBar.location" = "left",
           "workbench.layoutControl.enabled" = false,
           "workbench.experimental.share.enabled" = true,
+          "workbench.editor.useModal" = "off",
           "workbench.colorCustomizations" = {
             "activityBar.background" = "#0000006a",
             "breadcrumb.background" = "#00000000",
@@ -143,7 +148,7 @@ let { Order, .. } = import "../order.contract.ncl" in
           # ESLint
           "eslint.execArgv" = ["--max-old-space-size=16384"],
           "eslint.lintTask.enable" = true,
-          "eslint.runtime" = "node",
+          "eslint.runtime" = "node", # make ESLint use current Node.js version instead of VSCode's
           "eslint.useFlatConfig" = true,
 
           # Diff
@@ -162,19 +167,19 @@ let { Order, .. } = import "../order.contract.ncl" in
 
           # Chat
           "chat.commandCenter.enabled" = false,
-          "claudeCode.preferredLocation" = "sidebar",
+          "claudeCode.preferredLocation" = "panel",
 
           # File associations
           "files.associations" = {
             ".git-blame-ignore-revs" = "ignore",
-            ".prototools" = "toml",
-            "*.bu" = "yaml",
-            "*.ign" = "json",
-            "*.sarif" = "json",
-            "*.sast" = "json",
-            Brewfile = "ruby",
-            "Brewfile.{app,desktop,fonts,util,makedep}" = "ruby",
-            Dangerfile = "ruby",
+            ".prototools" = "toml", # https://moonrepo.dev/docs/proto/config
+            "*.bu" = "yaml", # https://docs.fedoraproject.org/en-US/fedora-coreos/producing-ign/
+            "*.ign" = "json", # https://docs.fedoraproject.org/en-US/fedora-coreos/producing-ign/
+            "*.sarif" = "json", # https://sarif.info/
+            "*.sast" = "json", # https://docs.gitlab.com/ee/user/application_security/sast/index.html#output
+            Brewfile = "ruby", # https://github.com/Homebrew/homebrew-bundle
+            "Brewfile.{app,desktop,fonts,util,makedep}" = "ruby", # https://github.com/Homebrew/homebrew-bundle
+            Dangerfile = "ruby", # https://danger.systems/
             skhdrc = "shellscript",
             yabairc = "shellscript",
           },
@@ -232,6 +237,8 @@ let { Order, .. } = import "../order.contract.ncl" in
           "semanticdiff.defaultDiffViewer" = true,
 
           # YAML
+          # GitLab's custom tag
+          # https://docs.gitlab.com/ee/ci/yaml/yaml_optimization.html#configure-your-ide-to-support-reference-tags
           "yaml.customTags" = ["!reference sequence"],
 
           # Tinymist

@@ -1,9 +1,7 @@
 # Git configuration
-
 let { Order, .. } = import "../order.contract.ncl" in
 {
   blend = {
-    prefix = ["~/.config/git/"],
     files = [
       {
         from_file = "git",
@@ -11,6 +9,7 @@ let { Order, .. } = import "../order.contract.ncl" in
       },
       {
         from_file = "gitk",
+        prefix = ["~/.config/git/"],
         ignore = [
           "^set geometry",
         ],

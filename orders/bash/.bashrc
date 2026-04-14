@@ -1,4 +1,4 @@
 # shellcheck shell=dash
 
-eval "$(~/bin/shellenv)"
+eval "$(~/.local/bin/van/shellenv)"
 eval "$(starship init bash)"

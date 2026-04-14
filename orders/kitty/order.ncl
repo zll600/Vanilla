@@ -1,6 +1,5 @@
 # Kitty terminal configuration
 # https://sw.kovidgoyal.net/kitty/conf/
-
 let { Order, .. } = import "../order.contract.ncl" in
 {
   blend = {
@@ -9,9 +8,13 @@ let { Order, .. } = import "../order.contract.ncl" in
       {
         name = "kitty.conf",
         format = "space_delimited_pairs",
+        # reload kitty config
+        # - ctrl+shift+f5 (⌃+⌘+, on macOS)
+        # - sending kitty the SIGUSR1 signal with kill -SIGUSR1 $KITTY_PID
         from_config = [
           # Font
           ["font_size", "16.0"],
+          # kitten choose-fonts
           ["font_family", "family=\"JetBrainsMono Nerd Font Mono\""],
           ["bold_font", "auto"],
           ["italic_font", "auto"],
@@ -31,7 +34,7 @@ let { Order, .. } = import "../order.contract.ncl" in
           ["include", "themes/mocha.conf"],
 
           # Appearance
-          ["background_opacity", "0.6"],
+          ["background_opacity", "0.5"],
           ["background_blur", "2"],
           ["background", "#000000"],
           ["tab_bar_background", "#2c2421"],
@@ -39,10 +42,10 @@ let { Order, .. } = import "../order.contract.ncl" in
 
           # Behavior
           ["close_on_child_death", "yes"],
-          ["text_fg_override_threshold", "10"],
 
           # Shortcuts - clear all for zellij, then re-add essentials
           ["clear_all_shortcuts", "yes"],
+
           # linux
           ["map", "ctrl+shift+c copy_to_clipboard"],
           ["map", "ctrl+shift+v paste_from_clipboard"],

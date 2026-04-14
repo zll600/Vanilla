@@ -1,5 +1,4 @@
 # Zsh shell configuration
-
 let { Order, .. } = import "../order.contract.ncl" in
 {
   blend = {
@@ -7,9 +6,11 @@ let { Order, .. } = import "../order.contract.ncl" in
     files = [
       {
         from_file = ".zshrc",
+        immutable = true,
       },
       {
         from_file = ".zshenv",
+        immutable = true,
       },
     ],
     when = { os = ["darwin", "linux"] },

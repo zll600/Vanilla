@@ -1,6 +1,6 @@
 # Alacritty terminal configuration (Linux)
 # https://alacritty.org/config-alacritty.html
-
+let metadata = import "blend://metadata" in
 let { Order, .. } = import "../order.contract.ncl" in
 {
   blend = {
@@ -8,45 +8,40 @@ let { Order, .. } = import "../order.contract.ncl" in
     files = [
       {
         name = "alacritty.toml",
-        from_config = {
-          terminal = {
-            shell = {
-              program = "/usr/bin/env",
-              args = ["elvish"],
-            },
-          },
-
-          window = {
-            decorations = "None",
-            opacity = 0.7,
-          },
-
-          font = {
-            size = 12.0,
-
-            bold = {
-              family = "JetBrains Mono",
-              style = "Bold",
+        from_config =
+          {
+            window = {
+              decorations =
+                metadata.os
+                |> match {
+                  "darwin" => "Buttonless",
+                  _ => "None",
+                },
+              opacity = 0.7,
             },
 
-            bold_italic = {
-              family = "Jetbrains Mono",
-              style = "Bold Italic",
+            font = {
+              size = 12.0,
+              bold = { family = "JetBrains Mono", style = "Bold" },
+              bold_italic = { family = "Jetbrains Mono", style = "Bold Italic" },
+              italic = { family = "Jetbrains Mono", style = "Italic" },
+              normal = { family = "Jetbrains Mono", style = "Regular" },
             },
-
-            italic = {
-              family = "Jetbrains Mono",
-              style = "Italic",
-            },
-
-            normal = {
-              family = "Jetbrains Mono",
-              style = "Regular",
-            },
-          },
-        },
+          }
+          & (
+            metadata.os
+            |> match {
+              "linux" =>
+                {
+                  terminal.shell = {
+                    program = "/usr/bin/env",
+                    args = ["elvish"],
+                  },
+                },
+              _ => {},
+            }
+          ),
       },
     ],
-    when = { os = ["linux"] },
   },
 } | Order

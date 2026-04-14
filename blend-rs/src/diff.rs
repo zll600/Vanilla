@@ -1,10 +1,13 @@
 mod semantic;
 mod text;
 
-pub use semantic::semantic_diff;
+#[allow(unused_imports)]
+pub use semantic::{KeyChange, KeyChangeType, semantic_diff, semantic_diff_keys};
 pub use text::text_diff;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use walkdir::WalkDir;
 
 use crate::formats::get_renderer;
 use crate::nickel::{FileEntry, Format};
@@ -34,6 +37,133 @@ impl DiffResult {
     }
 }
 
+/// Result of comparing a single file within a directory
+#[derive(Debug)]
+pub struct FileDiffResult {
+    /// Relative path within the directory
+    pub rel_path: PathBuf,
+    /// Whether the file has changes (or is new/missing)
+    pub has_changes: bool,
+    /// Diff output if changes exist
+    pub diff_output: String,
+    /// Whether the file only exists in the source (not yet deployed)
+    pub source_only: bool,
+    /// Whether the file only exists in the target (extra deployed file)
+    pub target_only: bool,
+}
+
+/// Enumerate all files in source and target directories and compute per-file diffs.
+///
+/// Returns a `FileDiffResult` for each file found in either directory.
+pub fn diff_directory(
+    source_dir: &Path,
+    target_dir: &Path,
+    ignore_patterns: &[String],
+) -> Vec<FileDiffResult> {
+    let mut results = Vec::new();
+    let mut seen_rel_paths = std::collections::HashSet::new();
+
+    // Walk source directory
+    if source_dir.is_dir() {
+        for entry in WalkDir::new(source_dir).min_depth(1).sort_by_file_name() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if entry.file_type().is_dir() {
+                continue;
+            }
+            let rel_path = match entry.path().strip_prefix(source_dir) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => continue,
+            };
+            seen_rel_paths.insert(rel_path.clone());
+
+            let target_file = target_dir.join(&rel_path);
+            if !target_file.exists() {
+                results.push(FileDiffResult {
+                    rel_path,
+                    has_changes: true,
+                    diff_output: String::new(),
+                    source_only: true,
+                    target_only: false,
+                });
+                continue;
+            }
+
+            // Both exist: compare contents
+            let source_content = match std::fs::read_to_string(entry.path()) {
+                Ok(c) => c,
+                Err(_) => {
+                    // Binary file — compare raw bytes
+                    let source_bytes = std::fs::read(entry.path()).unwrap_or_default();
+                    let target_bytes = std::fs::read(&target_file).unwrap_or_default();
+                    results.push(FileDiffResult {
+                        rel_path,
+                        has_changes: source_bytes != target_bytes,
+                        diff_output: String::new(),
+                        source_only: false,
+                        target_only: false,
+                    });
+                    continue;
+                }
+            };
+            let target_content = match std::fs::read_to_string(&target_file) {
+                Ok(c) => c,
+                Err(_) => {
+                    // Target is binary, source is text — they differ
+                    results.push(FileDiffResult {
+                        rel_path,
+                        has_changes: true,
+                        diff_output: String::new(),
+                        source_only: false,
+                        target_only: false,
+                    });
+                    continue;
+                }
+            };
+
+            let diff = text_diff(&source_content, &target_content, ignore_patterns);
+            results.push(FileDiffResult {
+                rel_path,
+                has_changes: diff.has_changes,
+                diff_output: diff.output,
+                source_only: false,
+                target_only: false,
+            });
+        }
+    }
+
+    // Walk target directory for files not in source
+    if target_dir.is_dir() {
+        for entry in WalkDir::new(target_dir).min_depth(1).sort_by_file_name() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if entry.file_type().is_dir() {
+                continue;
+            }
+            let rel_path = match entry.path().strip_prefix(target_dir) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => continue,
+            };
+            if seen_rel_paths.contains(&rel_path) {
+                continue;
+            }
+            results.push(FileDiffResult {
+                rel_path,
+                has_changes: true,
+                diff_output: String::new(),
+                source_only: false,
+                target_only: true,
+            });
+        }
+    }
+
+    results
+}
+
 /// Check whether a deployed target file is in sync with its source.
 ///
 /// Returns:
@@ -54,7 +184,6 @@ pub fn check_file_sync(
         return None;
     }
 
-    let deployed = std::fs::read_to_string(target).ok()?;
     let mut ignore_keys: Vec<String> = global_ignore.to_vec();
     ignore_keys.extend(file_entry.ignore.iter().cloned());
 
@@ -62,12 +191,21 @@ pub fn check_file_sync(
         // Plaintext source file on disk
         let source_path = pkg_dir.join(file);
         if source_path.is_dir() {
-            return None;
+            // For directories, check all files within
+            let file_diffs = diff_directory(&source_path, target, &ignore_keys);
+            if file_diffs.is_empty() {
+                return None;
+            }
+            let all_in_sync = file_diffs.iter().all(|f| !f.has_changes);
+            return Some(all_in_sync);
         }
         let source_content = std::fs::read_to_string(&source_path).ok()?;
+        let deployed = std::fs::read_to_string(target).ok()?;
         let result = diff_configs(Format::Plaintext, &source_content, &deployed, &ignore_keys);
         return Some(!result.has_changes);
     }
+
+    let deployed = std::fs::read_to_string(target).ok()?;
 
     if let Some(config) = &file_entry.from_config {
         // Structured config rendered from nickel
@@ -80,6 +218,172 @@ pub fn check_file_sync(
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn write_file(base: &Path, relative: &str, content: &str) {
+        let path = base.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, content).unwrap();
+    }
+
+    #[test]
+    fn test_diff_directory_both_identical() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        write_file(source.path(), "a.txt", "hello\n");
+        write_file(source.path(), "b.txt", "world\n");
+        write_file(target.path(), "a.txt", "hello\n");
+        write_file(target.path(), "b.txt", "world\n");
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert!(!r.has_changes);
+            assert!(!r.source_only);
+            assert!(!r.target_only);
+        }
+    }
+
+    #[test]
+    fn test_diff_directory_source_only_file() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        write_file(source.path(), "only_in_source.txt", "data\n");
+        write_file(source.path(), "shared.txt", "same\n");
+        write_file(target.path(), "shared.txt", "same\n");
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 2);
+        let source_only = results
+            .iter()
+            .find(|r| r.rel_path == PathBuf::from("only_in_source.txt"))
+            .unwrap();
+        assert!(source_only.has_changes);
+        assert!(source_only.source_only);
+    }
+
+    #[test]
+    fn test_diff_directory_target_only_file() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        write_file(source.path(), "shared.txt", "same\n");
+        write_file(target.path(), "shared.txt", "same\n");
+        write_file(target.path(), "only_in_target.txt", "extra\n");
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 2);
+        let target_only = results
+            .iter()
+            .find(|r| r.rel_path == PathBuf::from("only_in_target.txt"))
+            .unwrap();
+        assert!(target_only.has_changes);
+        assert!(target_only.target_only);
+    }
+
+    #[test]
+    fn test_diff_directory_file_differs() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        write_file(source.path(), "config.txt", "key=new_value\n");
+        write_file(target.path(), "config.txt", "key=old_value\n");
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].has_changes);
+        assert!(!results[0].diff_output.is_empty());
+    }
+
+    #[test]
+    fn test_diff_directory_nested_subdirectories() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        write_file(source.path(), "a/b/c.txt", "deep\n");
+        write_file(source.path(), "a/d.txt", "shallow\n");
+        write_file(target.path(), "a/b/c.txt", "deep\n");
+        write_file(target.path(), "a/d.txt", "different\n");
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 2);
+        let deep = results
+            .iter()
+            .find(|r| r.rel_path == PathBuf::from("a/b/c.txt"))
+            .unwrap();
+        assert!(!deep.has_changes);
+        let shallow = results
+            .iter()
+            .find(|r| r.rel_path == PathBuf::from("a/d.txt"))
+            .unwrap();
+        assert!(shallow.has_changes);
+    }
+
+    #[test]
+    fn test_diff_directory_empty_directories() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        std::fs::create_dir_all(source.path().join("empty_sub")).unwrap();
+        std::fs::create_dir_all(target.path().join("empty_sub")).unwrap();
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_diff_directory_binary_files_differ() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        std::fs::write(source.path().join("image.bin"), &[0x00, 0xFF, 0x80, 0x01]).unwrap();
+        std::fs::write(target.path().join("image.bin"), &[0x00, 0xFF, 0x80, 0x02]).unwrap();
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].has_changes);
+        assert!(results[0].diff_output.is_empty());
+    }
+
+    #[test]
+    fn test_diff_directory_binary_files_identical() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let bytes = [0x00, 0xFF, 0x80, 0x01];
+        std::fs::write(source.path().join("data.bin"), &bytes).unwrap();
+        std::fs::write(target.path().join("data.bin"), &bytes).unwrap();
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].has_changes);
+    }
+
+    #[test]
+    fn test_diff_directory_ignore_patterns() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        write_file(source.path(), "conf", "stable=1\nvolatile=aaa\n");
+        write_file(target.path(), "conf", "stable=1\nvolatile=zzz\n");
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert!(results[0].has_changes);
+        let results = diff_directory(source.path(), target.path(), &["^volatile".to_string()]);
+        assert!(!results[0].has_changes);
+    }
+
+    #[test]
+    fn test_diff_directory_source_does_not_exist() {
+        let target = TempDir::new().unwrap();
+        write_file(target.path(), "a.txt", "hello\n");
+        let fake_source = target.path().join("nonexistent");
+        let results = diff_directory(&fake_source, target.path(), &[]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].target_only);
+    }
+
+    #[test]
+    fn test_diff_directory_target_does_not_exist() {
+        let source = TempDir::new().unwrap();
+        write_file(source.path(), "a.txt", "hello\n");
+        let fake_target = source.path().join("nonexistent");
+        let results = diff_directory(source.path(), &fake_target, &[]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].source_only);
+    }
+}
+
 /// Diff two configs based on format
 pub fn diff_configs(
     format: Format,
@@ -90,6 +394,7 @@ pub fn diff_configs(
     match format {
         Format::Toml
         | Format::Json
+        | Format::Jsonc
         | Format::Yaml
         | Format::SpaceDelimitedRecord
         | Format::EqualDelimitedRecord => semantic_diff(format, generated, deployed, ignore_keys),

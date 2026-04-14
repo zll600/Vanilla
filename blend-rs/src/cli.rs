@@ -60,6 +60,10 @@ pub enum Commands {
         /// Show both generated content and diff
         #[arg(short = 'a', long)]
         all: bool,
+
+        /// Omit up-to-date files from output (only show files with changes)
+        #[arg(short = 's', long)]
+        short: bool,
     },
 
     /// Output package info as HTML table (for README generation)
