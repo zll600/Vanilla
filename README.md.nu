@@ -1,6 +1,6 @@
 #!/usr/bin/env nu
 
-let blend_rs = [$env.FILE_PWD "blend-rs" "target" "release" "blend"] | path join
+let blend_bin = [$env.FILE_PWD "blend" "target" "release" "blend"] | path join
 
 let content = $"# 𝒱𝒶𝓃𝒾𝓁𝓁𝒶
 
@@ -23,9 +23,9 @@ _macOS_:
 
 ## Config packages
 
-Configs are defined as Nickel DSL orders in `orders/` and deployed via `blend-rs`.
+Configs are defined as Nickel DSL orders in `orders/` and deployed via `blend`.
 
-(run-external $blend_rs "table" | str trim)
+(run-external $blend_bin "table" | str trim)
 
 ## Usage
 

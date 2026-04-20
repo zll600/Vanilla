@@ -4,33 +4,47 @@ default:
 # Build all executables (release by default)
 build: build-blend
 
-# Build blend-rs and symlink into bin/
+# Build blend and symlink into bin/
 build-blend:
-    cd blend-rs && cargo build --release
-    ln -sf ../blend-rs/target/release/blend bin/blend
-    ln -sf blend-rs/target/release/blend blend
+    cd blend && cargo build --release
+    ln -sf ../blend/target/release/blend bin/blend
 
-# Build blend-rs in debug mode (for development)
+# Build blend in debug mode (for development)
 build-debug:
-    cd blend-rs && cargo build
-    ln -sf ../blend-rs/target/debug/blend bin/blend-debug
-    ln -sf blend-rs/target/debug/blend blend-debug
+    cd blend && cargo build
+    ln -sf ../blend/target/debug/blend bin/blend-debug
 
 # Validate all orders
 check:
-    ./blend view --dry-run
+    bin/blend view --dry-run
+
+# Run rustfmt on the blend crate
+fmt:
+    cd blend && cargo fmt
+
+# Check formatting without modifying files (CI-equivalent)
+fmt-check:
+    cd blend && cargo fmt --check
+
+# Run clippy on the blend crate (CI-equivalent)
+clippy:
+    cd blend && cargo clippy -- -D warnings
+
+# Run the blend test suite
+test:
+    cd blend && cargo test --release
 
 # Deploy all configs
 deploy:
-    ./blend sync --push
+    bin/blend sync --push
 
 # Interactive sync
 sync *ARGS:
-    ./blend sync {{ARGS}}
+    bin/blend sync {{ARGS}}
 
 # System upgrade
 upgrade *STEP:
-    ./blend upgrade {{STEP}}
+    bin/blend upgrade {{STEP}}
 
 # Full bootstrap (called by bootstrap.sh after deps are installed)
 bootstrap:

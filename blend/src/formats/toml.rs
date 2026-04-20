@@ -7,8 +7,9 @@ pub struct TomlRenderer;
 
 impl FormatRenderer for TomlRenderer {
     fn render(&self, value: &serde_json::Value) -> Result<String> {
-        // Convert JSON to TOML-compatible structure
-        let toml_value = json_to_toml(value)?;
+        // Convert JSON to TOML-compatible structure (null values stripped)
+        let toml_value =
+            json_to_toml(value)?.context("Top-level value cannot be null for TOML rendering")?;
         let output =
             ::toml::to_string_pretty(&toml_value).context("Failed to serialize to TOML")?;
         Ok(output)
@@ -21,31 +22,38 @@ impl FormatRenderer for TomlRenderer {
     }
 }
 
-/// Convert JSON Value to TOML Value
-fn json_to_toml(json: &serde_json::Value) -> Result<::toml::Value> {
+/// Convert JSON Value to TOML Value.
+/// Returns None for null values — TOML has no null type, so null means "absent key".
+fn json_to_toml(json: &serde_json::Value) -> Result<Option<::toml::Value>> {
     match json {
-        serde_json::Value::Null => Ok(::toml::Value::String("null".to_string())),
-        serde_json::Value::Bool(b) => Ok(::toml::Value::Boolean(*b)),
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Bool(b) => Ok(Some(::toml::Value::Boolean(*b))),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(::toml::Value::Integer(i))
+                Ok(Some(::toml::Value::Integer(i)))
             } else if let Some(f) = n.as_f64() {
-                Ok(::toml::Value::Float(f))
+                Ok(Some(::toml::Value::Float(f)))
             } else {
-                Ok(::toml::Value::String(n.to_string()))
+                Ok(Some(::toml::Value::String(n.to_string())))
             }
         }
-        serde_json::Value::String(s) => Ok(::toml::Value::String(s.clone())),
+        serde_json::Value::String(s) => Ok(Some(::toml::Value::String(s.clone()))),
         serde_json::Value::Array(arr) => {
-            let values: Result<Vec<_>> = arr.iter().map(json_to_toml).collect();
-            Ok(::toml::Value::Array(values?))
+            let values: Result<Vec<_>> = arr
+                .iter()
+                .filter_map(|v| json_to_toml(v).transpose())
+                .collect();
+            Ok(Some(::toml::Value::Array(values?)))
         }
         serde_json::Value::Object(obj) => {
             let mut map = ::toml::map::Map::new();
             for (k, v) in obj {
-                map.insert(k.clone(), json_to_toml(v)?);
+                if let Some(toml_v) = json_to_toml(v)? {
+                    map.insert(k.clone(), toml_v);
+                }
+                // null values are silently omitted — absent key in TOML
             }
-            Ok(::toml::Value::Table(map))
+            Ok(Some(::toml::Value::Table(map)))
         }
     }
 }
@@ -125,5 +133,24 @@ success_symbol = "[>](bold green)"
         assert_eq!(original["key"], parsed["key"]);
         assert_eq!(original["number"], parsed["number"]);
         assert_eq!(original["nested"]["bool"], parsed["nested"]["bool"]);
+    }
+
+    #[test]
+    fn test_null_values_stripped() {
+        let renderer = TomlRenderer;
+        let value = json!({
+            "keep": "hello",
+            "remove": null,
+            "nested": {
+                "present": 1,
+                "absent": null,
+            }
+        });
+
+        let result = renderer.render(&value).unwrap();
+        assert!(result.contains("keep = \"hello\""));
+        assert!(!result.contains("remove"));
+        assert!(result.contains("present = 1"));
+        assert!(!result.contains("absent"));
     }
 }

@@ -19,7 +19,7 @@ _macOS_:
 
 ## Config packages
 
-Configs are defined as Nickel DSL orders in `orders/` and deployed via `blend-rs`.
+Configs are defined as Nickel DSL orders in `orders/` and deployed via `blend`.
 
 <table><thead><tr><th>package</th><th colspan="3">profiles</th></tr></thead><tbody>
 <tr><td><a href="orders/alacritty">alacritty</a></td><td><code>linux-x86_64</code></td><td><code>macos-x86_64</code></td><td><code>macos-aarch64</code></td></tr>

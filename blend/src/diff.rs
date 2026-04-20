@@ -48,117 +48,85 @@ pub struct FileDiffResult {
     pub diff_output: String,
     /// Whether the file only exists in the source (not yet deployed)
     pub source_only: bool,
-    /// Whether the file only exists in the target (extra deployed file)
-    pub target_only: bool,
 }
 
-/// Enumerate all files in source and target directories and compute per-file diffs.
+/// Enumerate files in the source directory and compare each against the target.
 ///
-/// Returns a `FileDiffResult` for each file found in either directory.
+/// Files present only in the target are intentionally ignored — blend only manages
+/// files originating from the source side, and walking large deployed directories
+/// (e.g. `~/.proto`, `~/.cache`) was the dominant cost of the status command.
 pub fn diff_directory(
     source_dir: &Path,
     target_dir: &Path,
     ignore_patterns: &[String],
 ) -> Vec<FileDiffResult> {
     let mut results = Vec::new();
-    let mut seen_rel_paths = std::collections::HashSet::new();
 
-    // Walk source directory
-    if source_dir.is_dir() {
-        for entry in WalkDir::new(source_dir).min_depth(1).sort_by_file_name() {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if entry.file_type().is_dir() {
-                continue;
-            }
-            let rel_path = match entry.path().strip_prefix(source_dir) {
-                Ok(r) => r.to_path_buf(),
-                Err(_) => continue,
-            };
-            seen_rel_paths.insert(rel_path.clone());
-
-            let target_file = target_dir.join(&rel_path);
-            if !target_file.exists() {
-                results.push(FileDiffResult {
-                    rel_path,
-                    has_changes: true,
-                    diff_output: String::new(),
-                    source_only: true,
-                    target_only: false,
-                });
-                continue;
-            }
-
-            // Both exist: compare contents
-            let source_content = match std::fs::read_to_string(entry.path()) {
-                Ok(c) => c,
-                Err(_) => {
-                    // Binary file — compare raw bytes
-                    let source_bytes = std::fs::read(entry.path()).unwrap_or_default();
-                    let target_bytes = std::fs::read(&target_file).unwrap_or_default();
-                    results.push(FileDiffResult {
-                        rel_path,
-                        has_changes: source_bytes != target_bytes,
-                        diff_output: String::new(),
-                        source_only: false,
-                        target_only: false,
-                    });
-                    continue;
-                }
-            };
-            let target_content = match std::fs::read_to_string(&target_file) {
-                Ok(c) => c,
-                Err(_) => {
-                    // Target is binary, source is text — they differ
-                    results.push(FileDiffResult {
-                        rel_path,
-                        has_changes: true,
-                        diff_output: String::new(),
-                        source_only: false,
-                        target_only: false,
-                    });
-                    continue;
-                }
-            };
-
-            let diff = text_diff(&source_content, &target_content, ignore_patterns);
-            results.push(FileDiffResult {
-                rel_path,
-                has_changes: diff.has_changes,
-                diff_output: diff.output,
-                source_only: false,
-                target_only: false,
-            });
-        }
+    if !source_dir.is_dir() {
+        return results;
     }
 
-    // Walk target directory for files not in source
-    if target_dir.is_dir() {
-        for entry in WalkDir::new(target_dir).min_depth(1).sort_by_file_name() {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if entry.file_type().is_dir() {
-                continue;
-            }
-            let rel_path = match entry.path().strip_prefix(target_dir) {
-                Ok(r) => r.to_path_buf(),
-                Err(_) => continue,
-            };
-            if seen_rel_paths.contains(&rel_path) {
-                continue;
-            }
+    for entry in WalkDir::new(source_dir).min_depth(1).sort_by_file_name() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let rel_path = match entry.path().strip_prefix(source_dir) {
+            Ok(r) => r.to_path_buf(),
+            Err(_) => continue,
+        };
+
+        let target_file = target_dir.join(&rel_path);
+        if !target_file.exists() {
             results.push(FileDiffResult {
                 rel_path,
                 has_changes: true,
                 diff_output: String::new(),
-                source_only: false,
-                target_only: true,
+                source_only: true,
             });
+            continue;
         }
+
+        // Both exist: compare contents
+        let source_content = match std::fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => {
+                // Binary file — compare raw bytes
+                let source_bytes = std::fs::read(entry.path()).unwrap_or_default();
+                let target_bytes = std::fs::read(&target_file).unwrap_or_default();
+                results.push(FileDiffResult {
+                    rel_path,
+                    has_changes: source_bytes != target_bytes,
+                    diff_output: String::new(),
+                    source_only: false,
+                });
+                continue;
+            }
+        };
+        let target_content = match std::fs::read_to_string(&target_file) {
+            Ok(c) => c,
+            Err(_) => {
+                // Target is binary, source is text — they differ
+                results.push(FileDiffResult {
+                    rel_path,
+                    has_changes: true,
+                    diff_output: String::new(),
+                    source_only: false,
+                });
+                continue;
+            }
+        };
+
+        let diff = text_diff(&source_content, &target_content, ignore_patterns);
+        results.push(FileDiffResult {
+            rel_path,
+            has_changes: diff.has_changes,
+            diff_output: diff.output,
+            source_only: false,
+        });
     }
 
     results
@@ -245,7 +213,6 @@ mod tests {
         for r in &results {
             assert!(!r.has_changes);
             assert!(!r.source_only);
-            assert!(!r.target_only);
         }
     }
 
@@ -267,20 +234,18 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_directory_target_only_file() {
+    fn test_diff_directory_ignores_extra_target_files() {
+        // Files present only in the target are intentionally ignored —
+        // blend only manages files that originate from the source side.
         let source = TempDir::new().unwrap();
         let target = TempDir::new().unwrap();
         write_file(source.path(), "shared.txt", "same\n");
         write_file(target.path(), "shared.txt", "same\n");
         write_file(target.path(), "only_in_target.txt", "extra\n");
         let results = diff_directory(source.path(), target.path(), &[]);
-        assert_eq!(results.len(), 2);
-        let target_only = results
-            .iter()
-            .find(|r| r.rel_path == PathBuf::from("only_in_target.txt"))
-            .unwrap();
-        assert!(target_only.has_changes);
-        assert!(target_only.target_only);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rel_path, PathBuf::from("shared.txt"));
+        assert!(!results[0].has_changes);
     }
 
     #[test]
@@ -365,12 +330,13 @@ mod tests {
 
     #[test]
     fn test_diff_directory_source_does_not_exist() {
+        // Without a source dir there is nothing to diff against — blend never
+        // reports unmanaged target files.
         let target = TempDir::new().unwrap();
         write_file(target.path(), "a.txt", "hello\n");
         let fake_source = target.path().join("nonexistent");
         let results = diff_directory(&fake_source, target.path(), &[]);
-        assert_eq!(results.len(), 1);
-        assert!(results[0].target_only);
+        assert!(results.is_empty());
     }
 
     #[test]

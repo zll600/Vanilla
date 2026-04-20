@@ -112,11 +112,9 @@ fn compute_diff_for_result(result: &BuildResult) -> DiffResult {
     if result.is_plaintext {
         if let Some(source_path) = &result.source_path {
             if source_path.is_dir() {
-                // For directories, compute an aggregate diff from per-file results
-                let mut file_diffs =
-                    diff_directory(source_path, &result.target, &result.ignore_keys);
-                // Ignore unmanaged files in target — blend only cares about files it manages
-                file_diffs.retain(|f| !f.target_only);
+                // For directories, compute an aggregate diff from per-file results.
+                // diff_directory only reports files present in the source.
+                let file_diffs = diff_directory(source_path, &result.target, &result.ignore_keys);
                 return aggregate_dir_diff(&file_diffs);
             }
             if let (Ok(source_content), Ok(deployed)) = (
@@ -146,17 +144,14 @@ fn compute_dir_file_diffs(result: &BuildResult) -> Vec<FileDiffResult> {
     if let Some(source_path) = &result.source_path
         && source_path.is_dir()
     {
-        let mut diffs = diff_directory(source_path, &result.target, &result.ignore_keys);
-        // Ignore unmanaged files in target
-        diffs.retain(|f| !f.target_only);
-        return diffs;
+        return diff_directory(source_path, &result.target, &result.ignore_keys);
     }
     Vec::new()
 }
 
 /// Aggregate per-file diffs into a single DiffResult (for sync compatibility)
 fn aggregate_dir_diff(file_diffs: &[FileDiffResult]) -> DiffResult {
-    let any_changes = file_diffs.iter().any(|f| f.has_changes && !f.target_only);
+    let any_changes = file_diffs.iter().any(|f| f.has_changes);
     if !any_changes {
         return DiffResult::no_changes();
     }
@@ -1080,9 +1075,11 @@ fn cmd_status(ctx: &Context) -> anyhow::Result<()> {
     let mut pkg_list: Vec<_> = packages.into_iter().collect::<Vec<_>>();
     pkg_list.sort();
 
+    let timing = std::env::var("BLEND_TIMING").is_ok();
     let row_groups: Vec<Vec<String>> = pkg_list
         .par_iter()
         .map(|pkg| {
+            let t_pkg = std::time::Instant::now();
             let mut rows = Vec::new();
             match get_order_package(ctx, pkg) {
                 Ok(order_pkg) => {
@@ -1268,6 +1265,14 @@ fn cmd_status(ctx: &Context) -> anyhow::Result<()> {
                     ));
                 }
             }
+            if timing {
+                eprintln!(
+                    "[timing] pkg {} total={}us rows={}",
+                    pkg,
+                    t_pkg.elapsed().as_micros(),
+                    rows.len()
+                );
+            }
             rows
         })
         .collect();
@@ -1300,14 +1305,12 @@ mod tests {
                 rel_path: PathBuf::from("a.txt"),
                 has_changes: false,
                 source_only: false,
-                target_only: false,
                 diff_output: String::new(),
             },
             FileDiffResult {
                 rel_path: PathBuf::from("b.txt"),
                 has_changes: false,
                 source_only: false,
-                target_only: false,
                 diff_output: String::new(),
             },
         ];
@@ -1321,7 +1324,6 @@ mod tests {
             rel_path: PathBuf::from("modified.txt"),
             has_changes: true,
             source_only: false,
-            target_only: false,
             diff_output: "diff".to_string(),
         }];
         let result = aggregate_dir_diff(&diffs);
@@ -1335,27 +1337,12 @@ mod tests {
             rel_path: PathBuf::from("new_file.txt"),
             has_changes: true,
             source_only: true,
-            target_only: false,
             diff_output: String::new(),
         }];
         let result = aggregate_dir_diff(&diffs);
+        let plain = console::strip_ansi_codes(&result.output);
         assert!(result.has_changes);
-        assert!(result.output.contains("+ new_file.txt"));
-    }
-
-    #[test]
-    fn test_aggregate_dir_diff_target_only_ignored() {
-        // target_only entries are filtered out before reaching aggregate_dir_diff
-        let diffs = vec![FileDiffResult {
-            rel_path: PathBuf::from("removed.txt"),
-            has_changes: true,
-            source_only: false,
-            target_only: true,
-            diff_output: String::new(),
-        }];
-        let result = aggregate_dir_diff(&diffs);
-        // target_only entries are not considered changes (unmanaged files)
-        assert!(!result.has_changes);
+        assert!(plain.contains("+ new_file.txt"));
     }
 
     #[test]
@@ -1364,12 +1351,12 @@ mod tests {
             rel_path: PathBuf::from("changed.conf"),
             has_changes: true,
             source_only: false,
-            target_only: false,
             diff_output: "line diff".to_string(),
         }];
         let result = aggregate_dir_diff(&diffs);
+        let plain = console::strip_ansi_codes(&result.output);
         assert!(result.has_changes);
-        assert!(result.output.contains("\u{2260} changed.conf"));
+        assert!(plain.contains("\u{2260} changed.conf"));
     }
 
     #[test]
@@ -1380,36 +1367,32 @@ mod tests {
 
     #[test]
     fn test_aggregate_dir_diff_mixed_indicators() {
-        // target_only entries are filtered before reaching aggregate_dir_diff,
-        // so we only test source_only, modified, and in-sync
         let diffs = vec![
             FileDiffResult {
                 rel_path: PathBuf::from("added.txt"),
                 has_changes: true,
                 source_only: true,
-                target_only: false,
                 diff_output: String::new(),
             },
             FileDiffResult {
                 rel_path: PathBuf::from("modified.txt"),
                 has_changes: true,
                 source_only: false,
-                target_only: false,
                 diff_output: "diff".to_string(),
             },
             FileDiffResult {
                 rel_path: PathBuf::from("stable.txt"),
                 has_changes: false,
                 source_only: false,
-                target_only: false,
                 diff_output: String::new(),
             },
         ];
         let result = aggregate_dir_diff(&diffs);
+        let plain = console::strip_ansi_codes(&result.output);
         assert!(result.has_changes);
-        assert!(result.output.contains("+ added.txt"));
-        assert!(result.output.contains("\u{2260} modified.txt"));
-        assert!(!result.output.contains("stable.txt"));
+        assert!(plain.contains("+ added.txt"));
+        assert!(plain.contains("\u{2260} modified.txt"));
+        assert!(!plain.contains("stable.txt"));
     }
 
     #[test]

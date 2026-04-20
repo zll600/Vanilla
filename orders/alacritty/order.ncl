@@ -8,39 +8,36 @@ let { Order, .. } = import "../order.contract.ncl" in
     files = [
       {
         name = "alacritty.toml",
-        from_config =
-          {
-            window = {
-              decorations =
-                metadata.os
-                |> match {
-                  "darwin" => "Buttonless",
-                  _ => "None",
-                },
-              opacity = 0.7,
-            },
+        from_config = {
+          window = {
+            decorations =
+              metadata.os
+              |> match {
+                "darwin" => "Buttonless",
+                _ => "None",
+              },
 
-            font = {
-              size = 12.0,
-              bold = { family = "JetBrains Mono", style = "Bold" },
-              bold_italic = { family = "Jetbrains Mono", style = "Bold Italic" },
-              italic = { family = "Jetbrains Mono", style = "Italic" },
-              normal = { family = "Jetbrains Mono", style = "Regular" },
-            },
-          }
-          & (
-            metadata.os
-            |> match {
-              "linux" =>
-                {
-                  terminal.shell = {
-                    program = "/usr/bin/env",
-                    args = ["elvish"],
-                  },
-                },
-              _ => {},
-            }
-          ),
+            opacity =
+              metadata.os
+              |> match {
+                "darwin" => 0.8,
+                _ => 0.7,
+              },
+          },
+
+          terminal.shell = {
+            program = "/usr/bin/env",
+            args = ["elvish"],
+          },
+
+          font = {
+            size = 12.0,
+            bold = { family = "JetBrains Mono", style = "Bold" },
+            bold_italic = { family = "Jetbrains Mono", style = "Bold Italic" },
+            italic = { family = "Jetbrains Mono", style = "Italic" },
+            normal = { family = "Jetbrains Mono", style = "Regular" },
+          },
+        }
       },
     ],
   },

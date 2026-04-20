@@ -23,7 +23,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub home: Option<PathBuf>,
 
-    /// Override orders directory (default: ../orders relative to blend-rs)
+    /// Override orders directory (default: ../orders relative to blend)
     #[arg(long, global = true)]
     pub orders: Option<PathBuf>,
 }

@@ -32,6 +32,10 @@ hostname = "0.4"
 # Parallelism
 rayon = "1"
 
+# Tree-sitter (CST structural parsing)
+tree-sitter = "0.25"
+tree-sitter-nickel = "0.5"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"

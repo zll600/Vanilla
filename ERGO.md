@@ -1,8 +1,8 @@
-# blend-rs User Journey Analysis & Improvement Opportunities
+# blend User Journey Analysis & Improvement Opportunities
 
 ## Context
 
-Investigating the current blend-rs implementation (at `~/Vanilla/blend-rs/`) to map essential user journeys and identify friction points. blend-rs is a Rust-based dotfiles manager using Nickel DSL, managing ~55 packages across macOS and Linux.
+Investigating the current blend implementation (at `~/Vanilla/blend/`) to map essential user journeys and identify friction points. blend is a Rust-based dotfiles manager using Nickel DSL, managing ~55 packages across macOS and Linux.
 
 **Current CLI commands:** `sync`, `view`, `table`, `upgrade` (alias `s`). The previous `ship` and `sample` commands have been replaced by `sync`.
 
@@ -30,8 +30,8 @@ Investigating the current blend-rs implementation (at `~/Vanilla/blend-rs/`) to 
 |---|-------|----------|--------|
 | 1 | **`blend install` doesn't exist** | Critical | `bootstrap_macos.sh:47` calls `./blend install` but should be `./blend sync --push`. The `sync --push` flag pushes all configs without interactive prompts |
 | 2 | **Chicken-and-egg: Rust needed to build blend** | High | Need `cargo build --release` before blend can run, but blend manages toolchain configs (proto). Bootstrap must install Rust independently first |
-| 3 | **No pre-built binary** | Medium | No release artifacts, no `cargo install blend-rs`. Every fresh machine requires a full Rust compile (~minutes) |
-| 4 | **blend not on PATH initially** | Medium | Binary is at `Vanilla/blend-rs/target/release/blend` (symlinked to `Vanilla/blend`). User's shell PATH isn't configured until blend syncs the shell configs |
+| 3 | **No pre-built binary** | Medium | No release artifacts, no `cargo install blend`. Every fresh machine requires a full Rust compile (~minutes) |
+| 4 | **blend not on PATH initially** | Medium | Binary is at `Vanilla/blend/target/release/blend` (symlinked to `Vanilla/bin/blend`). User's shell PATH isn't configured until blend syncs the shell configs |
 | 5 | **Orders dir discovery is fragile** | Low | `find_orders_dir()` in `context.rs` searches relative to exe and CWD. Fails silently with fallback to `../orders` if both miss |
 | 6 | **No first-run guidance** | Low | Running `blend` on a clean machine shows status table with all "pending" — no hint about what to do next |
 
@@ -110,14 +110,34 @@ These friction points from the original analysis have been addressed by `blend s
 | 2 | **Discovering which fields to `ignore`** | Low | Fields that apps frequently auto-update (zoom levels, timestamps) cause noisy diffs. Finding which to ignore is trial-and-error |
 | 3 | **No watch/auto-detect mode** | Low | Can't monitor deployed configs for changes and notify/prompt. Must manually check `blend` status |
 | 4 | **Non-rewritable fields info display** | Low | When `--no-rewrite` is active or a field can't be auto-pulled, the info display (branch context + Nickel snippet) is not yet fully implemented |
-| 5 | **Surgical rewrite can't add/delete keys** | Medium | Per-key pull of a key that exists in deployed but not in the `.ncl` (shown as `-` in diff) silently fails — the key isn't inserted into the `.ncl`. Similarly, pulling a key deletion (key in `.ncl` but not deployed) can't remove it from the `.ncl`. The AST span-based rewrite only supports modifying existing leaf values, not inserting/deleting record fields. Users must manually edit the `.ncl` for these cases. |
+| 5 | **~~Surgical rewrite can't add/delete keys~~** | ~~Medium~~ | **Resolved** — tree-sitter-nickel CST provides StructureMap (record boundaries, field ranges, comma positions). `surgical_rewrite_with_structure()` now supports field insertion (at record's `}` with proper indentation) and deletion (full line removal). Flat dotted keys (e.g., `"workbench.editor.useModal"`) are handled by falling back to root record insertion with quoted key. |
+| 6 | **No graded sync-back UX** | Medium | Today sync-back is effectively binary: either auto-rewrite succeeds, or the user has to interpret a generic failure and manually edit Nickel. For GUI-driven apps that mutate deployed config opportunistically, blend should make partial success feel deliberate rather than accidental. |
+| 7 | **No persistent deploy state / merge base** | Medium | Cleanup of old targets after target-path changes, future 3-way merge, and better sync-back diagnostics all need a persisted record of "what was last deployed from which order entry to which target". Right now blend has no snapshot/base-state layer. |
 
 ### Improvement Ideas
 
-- Surgical rewrite key insertion: when pulling a new key from deployed, insert a new field into the Nickel record at the correct position
-- Surgical rewrite key deletion: when pulling a removal, delete the field from the Nickel record (including trailing comma handling)
+- ~~Surgical rewrite key insertion~~: **Implemented** via tree-sitter StructureMap
+- ~~Surgical rewrite key deletion~~: **Implemented** via tree-sitter StructureMap
 - Suggest ignore patterns: when a field keeps changing across consecutive syncs, suggest adding it to `ignore`
 - Watch mode: monitor deployed configs, auto-run `blend sync` or notify on changes
+- Make sync-back explicitly **tiered**:
+  - **Automatic**: existing key value changes on rewritable leaves (current behavior)
+  - **Assisted**: key additions/removals or non-rewritable expressions produce precise guidance instead of silent non-action
+  - **Merge-based**: future snapshot-backed 3-way merge for structural conflicts
+- Improve non-automatic sync ergonomics:
+  - Classify changes as value-changed / key-added / key-removed / non-rewritable
+  - Show the owning `from_config` entry, active branch context, and a suggested Nickel snippet for manual patching
+  - Summarize what was auto-pulled vs what still needs human edits
+- Treat `from_config` and `from_file` as different ergonomics trade-offs:
+  - `from_config` for stable, declarative, cross-platform config that benefits from Nickel logic
+  - `from_file` for GUI-churned config files whose schemas drift often and where fidelity matters more than structure
+- Add a deploy snapshot/base-state layer recording at least:
+  - package / file entry / target path
+  - rendered hash at deploy time
+  - source identity for the originating order entry
+  - deploy timestamp and machine identity
+  - deployment mode (copied / symlinked / immutable)
+  This state would unlock old-target cleanup after target changes, provide a merge base for future 3-way sync, and make sync diagnostics more explainable.
 
 ---
 
@@ -180,18 +200,28 @@ Features that were in "Improvement Ideas" and are now implemented:
 - **Context-aware shadow walk** — follows active match/if branches using runtime metadata
 - **`--no-rewrite` flag** — disables auto-pull for review-only mode
 - **`--dry-run` flag** — preview sync actions without changes
-- **Semantic diffing** — format-aware structured comparison for TOML/JSON/YAML
+- **Semantic diffing** — format-aware structured comparison for TOML/JSON/YAML/JSONC
+- **Per-key interactive sync** — `[p]ush p[u]ll [s]kip [a]ll-push a[l]l-pull [q]uit` per changed key for `from_config` entries
+- **tree-sitter StructureMap** — CST-based record boundary and field range extraction enabling key insertion/deletion in `.ncl` files
+- **JSONC format support** — parses JSON with comments/trailing commas (VS Code settings.json); JSON parser auto-falls back to JSONC
+- **Directory file listing** — `blend view` enumerates per-file status for directory `from_file` entries; `--short` flag omits up-to-date files
+- **`exclude` field** — glob patterns to skip files in `from_file` directories
+- **`local` overlay** — machine-specific file overrides via local overlay directory (auto-created, gitignored)
+- **`immutable` flag** — sets OS immutable flag (macOS `chflags uchg`, Linux `chattr +i`) on deployed files
+- **Symlink detection** — auto-replaces stow symlinks with real files during sync; detects symlinked parent directories
+- **Broken symlink handling** — `ensure_dir` removes broken symlinks blocking directory creation
+- **Numeric equivalence** — `12` and `12.0` treated as equal in semantic diff
 
 ---
 
 ## Files Referenced
 
 - `~/Vanilla/bootstrap_macos.sh` — bootstrap script (line 47: broken `install` subcommand)
-- `~/Vanilla/blend-rs/src/cli.rs` — CLI definition (Sync, View, Table, Upgrade commands)
-- `~/Vanilla/blend-rs/src/main.rs` — command handlers (cmd_sync, cmd_view, cmd_status)
-- `~/Vanilla/blend-rs/src/compose.rs` — package discovery and build pipeline
-- `~/Vanilla/blend-rs/src/sync.rs` — bidirectional sync: pull_from_file, pull_from_config, Prompter trait
-- `~/Vanilla/blend-rs/src/nickel/ast_utils.rs` — shadow walk, surgical rewrite, json_to_nickel
-- `~/Vanilla/blend-rs/src/context.rs` — orders dir discovery logic
-- `~/Vanilla/blend-rs/src/nickel/schema.rs` — order.ncl schema types (OrderPackage, FileEntry)
+- `~/Vanilla/blend/src/cli.rs` — CLI definition (Sync, View, Table, Upgrade commands)
+- `~/Vanilla/blend/src/main.rs` — command handlers (cmd_sync, cmd_view, cmd_status)
+- `~/Vanilla/blend/src/compose.rs` — package discovery and build pipeline
+- `~/Vanilla/blend/src/sync.rs` — bidirectional sync: pull_from_file, pull_from_config, Prompter trait
+- `~/Vanilla/blend/src/nickel/ast_utils.rs` — shadow walk, surgical rewrite, json_to_nickel
+- `~/Vanilla/blend/src/context.rs` — orders dir discovery logic
+- `~/Vanilla/blend/src/nickel/schema.rs` — order.ncl schema types (OrderPackage, FileEntry)
 - `~/Vanilla/NEW_BLEND.md` — architecture and design document

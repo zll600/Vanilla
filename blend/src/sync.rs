@@ -6,7 +6,7 @@ use console::style;
 use walkdir::WalkDir;
 
 use crate::context::Context;
-use crate::diff::{DiffResult, KeyChange};
+use crate::diff::{DiffResult, KeyChange, KeyChangeType};
 use crate::formats::get_renderer;
 use crate::nickel;
 use crate::output::log;
@@ -265,6 +265,8 @@ fn pull_directory(
 ///
 /// Uses context-aware shadow walk to find rewritable leaf values, including
 /// values inside conditional branches (match/if-then-else).
+/// When a StructureMap can be built, also supports inserting new fields and
+/// deleting removed fields.
 ///
 /// Returns Ok(true) if the rewrite succeeded, Ok(false) if it couldn't
 /// be done, Err on failure.
@@ -337,14 +339,44 @@ pub fn pull_from_config(
         0
     };
 
-    // Perform surgical rewrite
-    let new_source = nickel::ast_utils::surgical_rewrite(
-        &source,
-        leaf_spans,
-        current_json,
-        &deployed_json,
-        base_indent,
-    )?;
+    // Try structure-aware rewrite (supports insert/delete), fall back to
+    // modify-only if StructureMap cannot be built
+    let new_source = match nickel::structure_map::build_structure_map(&source, file_entry_index) {
+        Ok(structure) => {
+            let edits = build_field_edits_from_diff(current_json, &deployed_json);
+            if edits
+                .iter()
+                .all(|e| matches!(e, nickel::ast_utils::FieldEdit::Modify { .. }))
+            {
+                // Only modifications -- use the simpler path
+                nickel::ast_utils::surgical_rewrite(
+                    &source,
+                    leaf_spans,
+                    current_json,
+                    &deployed_json,
+                    base_indent,
+                )?
+            } else {
+                nickel::ast_utils::surgical_rewrite_with_structure(
+                    &source,
+                    &structure,
+                    leaf_spans,
+                    &edits,
+                    base_indent,
+                )?
+            }
+        }
+        Err(_) => {
+            // StructureMap build failed -- fall back to modify-only
+            nickel::ast_utils::surgical_rewrite(
+                &source,
+                leaf_spans,
+                current_json,
+                &deployed_json,
+                base_indent,
+            )?
+        }
+    };
 
     std::fs::write(&ncl_path, &new_source)
         .with_context(|| format!("Failed to write {}", ncl_path.display()))?;
@@ -358,6 +390,81 @@ pub fn pull_from_config(
     }
 
     Ok(true)
+}
+
+/// Build FieldEdit list by diffing current (repo) JSON against deployed JSON.
+///
+/// - Keys in deployed but not current -> Insert
+/// - Keys in current but not deployed -> Delete
+/// - Keys in both with different values -> Modify
+fn build_field_edits_from_diff(
+    current: &serde_json::Value,
+    deployed: &serde_json::Value,
+) -> Vec<nickel::ast_utils::FieldEdit> {
+    let mut edits = Vec::new();
+    collect_field_edits(current, deployed, "", &mut edits);
+    edits
+}
+
+/// Recursively collect field edits between two JSON values.
+fn collect_field_edits(
+    current: &serde_json::Value,
+    deployed: &serde_json::Value,
+    path: &str,
+    edits: &mut Vec<nickel::ast_utils::FieldEdit>,
+) {
+    match (current, deployed) {
+        (serde_json::Value::Object(cur_obj), serde_json::Value::Object(dep_obj)) => {
+            // Keys modified or deleted
+            for (key, cur_val) in cur_obj {
+                let key_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+
+                if let Some(dep_val) = dep_obj.get(key) {
+                    if cur_val != dep_val {
+                        // Both objects: recurse; otherwise treat as leaf modification
+                        if cur_val.is_object() && dep_val.is_object() {
+                            collect_field_edits(cur_val, dep_val, &key_path, edits);
+                        } else {
+                            edits.push(nickel::ast_utils::FieldEdit::Modify {
+                                path: key_path,
+                                new_value: dep_val.clone(),
+                            });
+                        }
+                    }
+                } else {
+                    // Key in current but not deployed -> Delete
+                    edits.push(nickel::ast_utils::FieldEdit::Delete { path: key_path });
+                }
+            }
+            // Keys added (in deployed but not current)
+            for (key, dep_val) in dep_obj {
+                if !cur_obj.contains_key(key) {
+                    let key_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    edits.push(nickel::ast_utils::FieldEdit::Insert {
+                        path: key_path,
+                        value: dep_val.clone(),
+                    });
+                }
+            }
+        }
+        _ => {
+            // Leaf values that differ
+            if current != deployed && !path.is_empty() {
+                edits.push(nickel::ast_utils::FieldEdit::Modify {
+                    path: path.to_string(),
+                    new_value: deployed.clone(),
+                });
+            }
+        }
+    }
 }
 
 /// Build a merged JSON value by starting from the deployed JSON and applying
@@ -460,6 +567,8 @@ fn merge_values(
 ///
 /// `pulled_keys` is the set of dotted key paths that should be pulled
 /// (deployed value wins for these keys in the .ncl rewrite).
+/// `key_changes` optionally provides change type info per key to enable
+/// structure-aware insertion and deletion.
 pub fn pull_from_config_keys(
     ctx: &Context,
     package: &str,
@@ -467,6 +576,30 @@ pub fn pull_from_config_keys(
     target: &Path,
     format: nickel::Format,
     pulled_keys: &[String],
+    dry_run: bool,
+) -> Result<bool> {
+    pull_from_config_keys_with_changes(
+        ctx,
+        package,
+        file_entry_index,
+        target,
+        format,
+        pulled_keys,
+        &[], // no change type info -- infer from diff
+        dry_run,
+    )
+}
+
+/// Pull specific keys with optional KeyChange metadata for insert/delete support.
+#[allow(clippy::too_many_arguments)]
+pub fn pull_from_config_keys_with_changes(
+    ctx: &Context,
+    package: &str,
+    file_entry_index: usize,
+    target: &Path,
+    format: nickel::Format,
+    pulled_keys: &[String],
+    key_changes: &[KeyChange],
     dry_run: bool,
 ) -> Result<bool> {
     if pulled_keys.is_empty() {
@@ -483,9 +616,6 @@ pub fn pull_from_config_keys(
         nickel::ast_utils::locate_from_config(&source, file_entry_index, &ctx.metadata)?;
 
     let leaf_spans = rewrite_result.rewritable_spans();
-    if leaf_spans.is_empty() {
-        return Ok(false);
-    }
 
     // Parse the deployed file
     let deployed_content = std::fs::read_to_string(target)
@@ -523,17 +653,72 @@ pub fn pull_from_config_keys(
         0
     };
 
-    // Build a "selective deployed" JSON that only has the pulled keys changed
-    // while keeping other values from current_json
-    let selective_deployed = build_selective_deployed(current_json, &deployed_json, pulled_keys);
+    // Build a change type lookup from key_changes if provided
+    let change_type_map: std::collections::HashMap<&str, &KeyChangeType> = key_changes
+        .iter()
+        .map(|kc| (kc.path.as_str(), &kc.change_type))
+        .collect();
 
-    let new_source = nickel::ast_utils::surgical_rewrite(
-        &source,
-        leaf_spans,
-        current_json,
-        &selective_deployed,
-        base_indent,
-    )?;
+    // Check if any pulled keys are insertions or deletions
+    let has_structural_changes = pulled_keys.iter().any(|k| {
+        if let Some(ct) = change_type_map.get(k.as_str()) {
+            matches!(ct, KeyChangeType::Added | KeyChangeType::Removed)
+        } else {
+            let in_cur = nickel::ast_utils::json_path_get(current_json, k).is_some();
+            let in_dep = nickel::ast_utils::json_path_get(&deployed_json, k).is_some();
+            (in_dep && !in_cur) || (in_cur && !in_dep)
+        }
+    });
+
+    // Try structure-aware rewrite if we have structural changes
+    let new_source = if has_structural_changes {
+        match nickel::structure_map::build_structure_map(&source, file_entry_index) {
+            Ok(structure) => {
+                let edits = build_field_edits_for_keys(
+                    current_json,
+                    &deployed_json,
+                    pulled_keys,
+                    &change_type_map,
+                );
+                nickel::ast_utils::surgical_rewrite_with_structure(
+                    &source,
+                    &structure,
+                    leaf_spans,
+                    &edits,
+                    base_indent,
+                )?
+            }
+            Err(_) => {
+                // Fall back: only handle modifications
+                if leaf_spans.is_empty() {
+                    return Ok(false);
+                }
+                let selective_deployed =
+                    build_selective_deployed(current_json, &deployed_json, pulled_keys);
+                nickel::ast_utils::surgical_rewrite(
+                    &source,
+                    leaf_spans,
+                    current_json,
+                    &selective_deployed,
+                    base_indent,
+                )?
+            }
+        }
+    } else {
+        if leaf_spans.is_empty() {
+            return Ok(false);
+        }
+        // Only modifications -- use existing path
+        let selective_deployed =
+            build_selective_deployed(current_json, &deployed_json, pulled_keys);
+        nickel::ast_utils::surgical_rewrite(
+            &source,
+            leaf_spans,
+            current_json,
+            &selective_deployed,
+            base_indent,
+        )?
+    };
 
     std::fs::write(&ncl_path, &new_source)
         .with_context(|| format!("Failed to write {}", ncl_path.display()))?;
@@ -553,36 +738,124 @@ pub fn pull_from_config_keys(
     Ok(true)
 }
 
+/// Build FieldEdit list for specific pulled keys, using change type info.
+///
+/// Uses dotted-path resolution so nested keys (e.g. `window.opacity`) are
+/// looked up through nested JSON objects.
+fn build_field_edits_for_keys(
+    current: &serde_json::Value,
+    deployed: &serde_json::Value,
+    pulled_keys: &[String],
+    change_types: &std::collections::HashMap<&str, &KeyChangeType>,
+) -> Vec<nickel::ast_utils::FieldEdit> {
+    pulled_keys
+        .iter()
+        .filter_map(|key| {
+            let change_type = if let Some(ct) = change_types.get(key.as_str()) {
+                (*ct).clone()
+            } else {
+                let in_cur = nickel::ast_utils::json_path_get(current, key).is_some();
+                let in_dep = nickel::ast_utils::json_path_get(deployed, key).is_some();
+                if in_cur && in_dep {
+                    KeyChangeType::Modified
+                } else if in_dep && !in_cur {
+                    KeyChangeType::Removed
+                } else if in_cur && !in_dep {
+                    KeyChangeType::Added
+                } else {
+                    return None;
+                }
+            };
+
+            match change_type {
+                KeyChangeType::Modified => {
+                    let dep_val = nickel::ast_utils::json_path_get(deployed, key)?;
+                    Some(nickel::ast_utils::FieldEdit::Modify {
+                        path: key.clone(),
+                        new_value: dep_val.clone(),
+                    })
+                }
+                KeyChangeType::Removed => {
+                    let dep_val = nickel::ast_utils::json_path_get(deployed, key)?;
+                    Some(nickel::ast_utils::FieldEdit::Insert {
+                        path: key.clone(),
+                        value: dep_val.clone(),
+                    })
+                }
+                KeyChangeType::Added => {
+                    Some(nickel::ast_utils::FieldEdit::Delete { path: key.clone() })
+                }
+            }
+        })
+        .collect()
+}
+
 /// Build a JSON value where only pulled keys take deployed values;
 /// all other keys keep their current (repo) values.
+///
+/// Pulled keys may be dotted paths (e.g. `window.opacity`); the overlay walks
+/// both objects in lockstep and replaces the subtree at any path that matches.
 fn build_selective_deployed(
     current: &serde_json::Value,
     deployed: &serde_json::Value,
     pulled_keys: &[String],
 ) -> serde_json::Value {
+    selective_overlay(current, deployed, pulled_keys, "")
+}
+
+fn selective_overlay(
+    current: &serde_json::Value,
+    deployed: &serde_json::Value,
+    pulled_keys: &[String],
+    path: &str,
+) -> serde_json::Value {
+    if !path.is_empty() && pulled_keys.iter().any(|k| k == path) {
+        return deployed.clone();
+    }
+
     match (current, deployed) {
         (serde_json::Value::Object(cur_obj), serde_json::Value::Object(dep_obj)) => {
             let mut result = serde_json::Map::new();
-            // Keep all current keys with their current values, unless pulled
             for (key, cur_val) in cur_obj {
-                if pulled_keys.iter().any(|k| k == key) {
-                    // This top-level key is pulled -> use deployed value
-                    if let Some(dep_val) = dep_obj.get(key) {
-                        result.insert(key.clone(), dep_val.clone());
-                    } else {
-                        // Key was removed in deployed; keep current to avoid data loss
-                        result.insert(key.clone(), cur_val.clone());
-                    }
+                let key_path = if path.is_empty() {
+                    key.clone()
                 } else {
-                    // Not pulled -> keep current value
+                    format!("{path}.{key}")
+                };
+                if let Some(dep_val) = dep_obj.get(key) {
+                    result.insert(
+                        key.clone(),
+                        selective_overlay(cur_val, dep_val, pulled_keys, &key_path),
+                    );
+                } else {
+                    // Key only in current; keep it (deletions are handled by
+                    // FieldEdit::Delete in the structural path).
                     result.insert(key.clone(), cur_val.clone());
+                }
+            }
+            // Keys only in deployed are picked up only if explicitly pulled
+            // at this exact path or under it.
+            for (key, dep_val) in dep_obj {
+                if cur_obj.contains_key(key) {
+                    continue;
+                }
+                let key_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                let prefix = format!("{key_path}.");
+                if pulled_keys
+                    .iter()
+                    .any(|k| k == &key_path || k.starts_with(&prefix))
+                {
+                    result.insert(key.clone(), dep_val.clone());
                 }
             }
             serde_json::Value::Object(result)
         }
         _ => {
-            // Non-object from_config: if any key is pulled, use deployed
-            if !pulled_keys.is_empty() {
+            if !pulled_keys.is_empty() && path.is_empty() {
                 deployed.clone()
             } else {
                 current.clone()
@@ -785,6 +1058,32 @@ mod tests {
         assert_eq!(
             prompter.ask_key_action("pkg", "file", &change),
             KeyAction::Skip
+        );
+    }
+
+    #[test]
+    fn test_build_selective_deployed_nested_key() {
+        use serde_json::json;
+        // semantic_diff_keys produces dotted paths like "window.opacity".
+        // build_selective_deployed must resolve them through nested JSON.
+        let current = json!({
+            "window": {"opacity": 0.7, "decorations": "Buttonless"},
+            "font": {"size": 12},
+        });
+        let deployed = json!({
+            "window": {"opacity": 0.8, "decorations": "Buttonless"},
+            "font": {"size": 12},
+        });
+        let pulled_keys = vec!["window.opacity".to_string()];
+        let result = build_selective_deployed(&current, &deployed, &pulled_keys);
+        assert_eq!(
+            result,
+            json!({
+                "window": {"opacity": 0.8, "decorations": "Buttonless"},
+                "font": {"size": 12},
+            }),
+            "Only window.opacity should adopt deployed value; got:\n{:#?}",
+            result
         );
     }
 

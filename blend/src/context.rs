@@ -70,7 +70,7 @@ fn find_orders_dir() -> PathBuf {
         if orders_dir.is_dir() {
             return orders_dir;
         }
-        // Also check parent (in case we're in blend-rs/)
+        // Also check parent (in case we're in blend/)
         if let Some(parent) = base.parent() {
             let orders_dir = parent.join("orders");
             if orders_dir.is_dir() {

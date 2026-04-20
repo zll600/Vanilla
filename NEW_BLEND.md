@@ -1,8 +1,8 @@
-# blend-rs: Design & Architecture
+# blend: Design & Architecture
 
 ## 1. Overview
 
-blend-rs is a cross-platform dotfiles manager that uses Nickel DSL to define, build, and deploy configuration files. It replaces the legacy nushell-based blend + GNU Stow symlinks with an explicit build-and-deploy model.
+blend is a cross-platform dotfiles manager that uses Nickel DSL to define, build, and deploy configuration files. It replaces the legacy nushell-based blend + GNU Stow symlinks with an explicit build-and-deploy model.
 
 **Key properties:**
 - Configs defined in Nickel (`.ncl` files) under `orders/`
@@ -11,7 +11,7 @@ blend-rs is a cross-platform dotfiles manager that uses Nickel DSL to define, bu
 - Bidirectional sync: push configs to targets or pull deployed changes back into `.ncl` source
 - Semantic diffing: structured formats are compared by parsed values, not text
 
-**Migration context:** The `packages/` directory contains the legacy static config files managed by stow. New configs go into `orders/` as `.ncl` files. Migration is in progress on branch `dev/new-blend`.
+**Migration context:** The `packages/` directory contains the legacy static config files managed by stow. New configs go into `orders/` as `.ncl` files. Active development branch is `dev/brand-new-blend`. macOS orders are fully migrated.
 
 ---
 
@@ -65,6 +65,10 @@ Each package is defined by `orders/<pkg>/order.ncl`. The evaluated result must c
 | `format` | String | No | Output format override (default: inferred from `name` extension) |
 | `ignore` | Array<String> | No | Keys/patterns to exclude from diff (merged with global) |
 | `when` | Record | No | Per-file condition: `{ os, arch, hostname }` |
+| `symlink` | Bool | No | Create symlink instead of copying (`from_file` only) |
+| `exclude` | Array<String> | No | Glob patterns to skip in `from_file` directories |
+| `local` | String | No | Local overlay directory for machine-specific overrides (auto-created, gitignored) |
+| `immutable` | Bool | No | Set OS immutable flag after deploying (macOS `chflags uchg`, Linux `chattr +i`) |
 
 ### Example: structured config (from_config)
 
@@ -201,11 +205,12 @@ Format is inferred from `name` extension when `format` is not set:
 | Extension | Format |
 |-----------|--------|
 | `.toml` | Toml |
-| `.json` | Json |
+| `.jsonc` | Jsonc |
+| `.json` | Json (auto-falls back to JSONC parsing if strict JSON fails) |
 | `.yaml`, `.yml` | Yaml |
 | anything else | Plaintext |
 
-Explicit `format` values: `"toml"`, `"json"`, `"yaml"`, `"space_delimited_pairs"`, `"space_delimited_record"`, `"equal_delimited_record"`, `"plaintext"`.
+Explicit `format` values: `"toml"`, `"json"`, `"jsonc"`, `"yaml"`, `"space_delimited_pairs"`, `"space_delimited_record"`, `"equal_delimited_record"`, `"plaintext"`.
 
 ---
 
@@ -252,14 +257,24 @@ No mainstream dotfiles manager achieves true bidirectional sync with templates:
 
 **Graceful degradation**: Fields are analyzed individually. A `from_config` block can have some auto-pullable fields and some manual-merge fields (`Partial` result).
 
-### Surgical .ncl Rewrite
+### Surgical .ncl Rewrite (Lens Put)
+
+The sync-back system follows a Lens framework: S × V' → S' where S is the `.ncl` source, V' is the modified deployed config, and S' is the new `.ncl`. The "complement" (information needed for write-back that isn't in the deployed config) comes from two sources:
+
+1. **Shadow walk (nickel-lang-parser AST)** — `LeafSpan` byte offsets for existing value modification
+2. **StructureMap (tree-sitter-nickel CST)** — record boundaries, field ranges, comma positions for field insertion/deletion
 
 When pulling deployed changes back:
 1. Shadow walk finds each field's leaf value byte span (`TermPos`)
-2. For values inside conditional branches, the walk follows the active branch
-3. Compute structural diff between current JSON (from Nickel eval) and deployed JSON
-4. Changed values: replace only that value's byte span (comments between fields stay intact)
-5. Other branches of match/if expressions are completely untouched
+2. StructureMap provides record `}` positions and field full ranges
+3. For values inside conditional branches, the walk follows the active branch
+4. Compute structural diff between current JSON (from Nickel eval) and deployed JSON
+5. Three edit types via `surgical_rewrite_with_structure()`:
+   - **Modify**: replace value bytes at `LeafSpan` offset (existing behavior)
+   - **Insert**: add new field before record's `}` with matching indentation
+   - **Delete**: remove field's full line including whitespace
+6. Edits applied back-to-front (descending byte offset) to preserve positions
+7. Falls back to modify-only if StructureMap build fails
 
 ```nickel
 # Before pull (user changed font_size to 16 on macOS):
@@ -305,6 +320,7 @@ blend sync --no-rewrite            Disable .ncl rewrite; show diff for manual me
 blend view [packages...]           Preview diffs (read-only)
 blend view -c [packages...]        Show generated content only (no diff)
 blend view -a [packages...]        Show both content and diff
+blend view -s [packages...]        Short mode: omit up-to-date entries
 blend table                        Output package info as HTML table (for README)
 blend upgrade                      System upgrade: package managers + sync
 blend s                            Alias for upgrade
@@ -322,7 +338,8 @@ blend s proto                      Run only Proto upgrade step
 | Format | Renderer | Usage | Render | Parse |
 |--------|----------|-------|--------|-------|
 | `Toml` | `TomlRenderer` | starship, aerospace, alacritty | JSON → TOML via `toml` crate | TOML → JSON |
-| `Json` | `JsonRenderer` | vscode settings | JSON → pretty JSON | JSON → JSON |
+| `Json` | `JsonRenderer` | vscode settings | JSON → pretty JSON | JSON → JSON (auto-falls back to JSONC) |
+| `Jsonc` | `JsoncRenderer` | JSONC files | JSON → pretty JSON | Strips comments + trailing commas → JSON |
 | `Yaml` | `JsonRenderer` | pueue | Same as JSON (YAML-compatible) | Same as JSON |
 | `SpaceDelimitedPairs` | `SpaceDelimitedPairsRenderer` | kitty | Array of `[key, val]` → `key val\n` lines | Lines → pairs |
 | `SpaceDelimitedRecord` | `SpaceDelimitedRecordRenderer` | ncdu | Object → `key val\n` lines | Lines → object |
@@ -350,23 +367,37 @@ Detected at startup and injected into Nickel via `import "blend://metadata"`:
 
 ## 8. Comparison with Other Tools
 
-| Aspect | GNU Stow | yadm | chezmoi | home-manager | **blend** |
-|--------|----------|------|---------|--------------|-----------|
-| **Approach** | Symlinks | Bare git | File copies | Nix derivations | DSL → copies |
-| **Source of truth** | Actual files | Actual files | Templates | Nix expressions | Nickel files |
-| **Templating** | -- | External | Go templates | Nix language | Nickel native |
-| **Conditionals** | -- | Alt files | Template logic | Nix logic | Nickel match/if |
-| **Structured diff** | -- | -- | -- | -- | **Semantic (format-aware)** |
-| **Bidirectional sync** | Symlinks | Git | Manual | Rebuild | **Context-aware auto-sync** |
-| **Format-aware** | -- | -- | -- | -- | **TOML/JSON/YAML/delimited** |
-| **Schema validation** | -- | -- | -- | Module types | Nickel contracts |
-| **Language** | Shell | Bash | Go | Nix | Rust |
+### Tool Snapshot
+
+| Tool | Source style | Deploy model | Sync-back story | Main trade-off |
+|------|--------------|--------------|-----------------|----------------|
+| GNU Stow | Plain files/dirs | Symlink farm | Trivial because repo and deployed are the same files | Extremely transparent, but repo path/layout leaks into deployed state |
+| yadm | Git repo in `$HOME`, alternate files, optional templates | Files in home, with alternates/templates materialized per machine | Not a first-class feature; mainly edit tracked files directly | Simple Git workflow, but conditionals and generated files become file-variant/template problems |
+| chezmoi | Source state with templates, data, scripts, attributes | Copies/rendered files applied to target state | `add`, `re-add`, and 3-way `merge`, but templates are still not naturally reversible | Mature workflow, but templated outputs remain a manual-merge world |
+| home-manager | Nix expressions/modules | Declarative generations + activation | Not designed for reverse sync; manual edits are outside the happy path | Very powerful for full user environments, but heavy and not GUI-edit friendly |
+| DFS | Custom reversible template syntax | Sync engine with persisted records/meta | Explicit 2-way sync is the headline feature | Strong reverse-sync ambition, but requires buying into a custom template language |
+| **blend** | Nickel config DSL plus `from_file` escape hatch | Rendered/copy targets, optional symlink entries | Auto-pulls `from_file`; selectively rewrites `from_config` values through active conditional branches | More structured and ergonomic than text templates, but currently only partially reversible |
+
+### Capability Comparison
+
+| Aspect | GNU Stow | yadm | chezmoi | DFS | **blend** |
+|--------|----------|------|---------|-----|-----------|
+| **Repo and deployed separated** | No | Partially | Yes | Yes | **Yes** |
+| **Template syntax embedded in target files** | No | Sometimes | Yes | Yes | **No** |
+| **Structured config as source** | No | No | Partial | Partial | **Yes** |
+| **Native conditionals** | No | File variants | Template logic | Template logic | **Nickel `match` / `if`** |
+| **Format-aware rendering** | No | No | Mostly text templates | Template-driven | **TOML / JSON / JSONC / YAML / delimited** |
+| **Semantic diff** | No | No | Limited | Limited | **Yes** |
+| **Reverse sync for generated configs** | N/A via symlinks | Weak | Partial/manual | Strongest among peers | **Partial, context-aware** |
+| **Good fit for GUI-mutated configs** | Only while symlinks stay healthy | Mixed | Mixed | Better | **Good, but key add/delete remains manual** |
+| **Best fit** | Static files, minimal abstraction | Git-centric dotfiles | Mature one-way apply workflow | Template-first 2-way sync | **Config-DSL-first dotfiles with selective reversibility** |
 
 **blend's unique value:**
-1. **Context-aware bidirectional sync** — auto-pulls deployed changes back into `.ncl` source, even through conditional branches, by walking the AST with runtime metadata
-2. **Format-aware semantic diff** — compares structured configs by parsed values, not text
-3. **Rust-native DSL** — Nickel embeds via crate, no subprocess or FFI
-4. **Hybrid model** — structured and plaintext configs handled by the same tool with format-appropriate strategies
+1. **Avoids template markers in target-file syntax** — logic lives in Nickel source rather than being embedded into TOML/JSON/INI-like files
+2. **Context-aware sync-back** — auto-pulls deployed value changes back into `.ncl` source, even through active conditional branches
+3. **Format-aware semantic diff** — compares structured configs by parsed values, not just text
+4. **Hybrid source model** — structured (`from_config`) and literal (`from_file`) configs handled by one tool with different sync strategies
+5. **Expandable format story** — even files that currently fall back to plaintext can gain semantic diff/sync-back later by adding parsers instead of inventing more template syntax
 
 ---
 
