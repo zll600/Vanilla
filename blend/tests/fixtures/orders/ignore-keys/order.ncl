@@ -1,6 +1,6 @@
 {
   blend = {
-    prefix = ["~/.config/test-ignore/"],
+    prefix = ["~/.config/ignore-keys/"],
     ignore = ["timestamp"],
     files = [
       {

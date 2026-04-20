@@ -70,6 +70,44 @@ fn main() {
     }
 }
 
+/// For directory-style entries: walk the source dir and check whether any
+/// per-file target is itself a symlink. Returns true even when resolved
+/// content matches, so callers can flag legacy stow leftovers within an
+/// otherwise in-sync directory.
+fn dir_has_inner_symlinks(source_dir: &std::path::Path, target_dir: &std::path::Path) -> bool {
+    diff_directory(source_dir, target_dir, &[])
+        .iter()
+        .any(|f| f.target_is_symlink)
+}
+
+/// True when the only differences in a directory entry are inner-file
+/// symlinks with matching resolved content. Push under this condition
+/// rewrites file types only — no content changes — so sync should
+/// auto-redeploy rather than prompt the user.
+fn only_structural_symlink_changes(result: &BuildResult) -> bool {
+    let Some(src) = result.source_path.as_ref() else {
+        return false;
+    };
+    if !src.is_dir() {
+        return false;
+    }
+    let file_diffs = compute_dir_file_diffs(result);
+    if file_diffs.is_empty() {
+        return false;
+    }
+    let mut saw_symlink = false;
+    for f in &file_diffs {
+        if !f.has_changes {
+            continue;
+        }
+        if f.source_only || !f.target_is_symlink || !f.diff_output.is_empty() {
+            return false;
+        }
+        saw_symlink = true;
+    }
+    saw_symlink
+}
+
 /// Check if a target path or any of its parent components is a symlink
 /// when the order entry does NOT want a symlink.
 fn target_is_unexpected_symlink(target: &std::path::Path, is_symlink_entry: bool) -> bool {
@@ -166,10 +204,15 @@ fn aggregate_dir_diff(file_diffs: &[FileDiffResult]) -> DiffResult {
                 style(format!("{} (not deployed)", path_str)).green()
             ));
         } else if f.has_changes {
+            let annotation = match (f.target_is_symlink, !f.diff_output.is_empty()) {
+                (true, true) => "unexpected symlink, modified",
+                (true, false) => "unexpected symlink",
+                (false, _) => "modified",
+            };
             output_lines.push(format!(
                 "{} {}",
                 style("\u{2260}").yellow(),
-                style(format!("{} (modified)", path_str)).yellow()
+                style(format!("{} ({})", path_str, annotation)).yellow()
             ));
             if !f.diff_output.is_empty() {
                 for line in f.diff_output.lines() {
@@ -303,34 +346,43 @@ fn cmd_sync(
             // Compute diff
             let diff_result = compute_diff_for_result(result);
 
-            if !diff_result.has_changes {
-                // Check for symlink mismatch: content matches but target is a symlink
-                // when it shouldn't be (e.g., leftover stow symlink)
-                if target_is_unexpected_symlink(&result.target, result.is_symlink) {
-                    if ctx.dry_run {
-                        log::info_important(&format!(
-                            "[dry-run] {}:{} content matches but target is a symlink — would re-deploy",
-                            pkg, result.name
-                        ));
-                    } else {
-                        match write_result(result, false) {
-                            Ok(()) => {
-                                log::success(&format!(
-                                    "Re-deployed {}:{} (replaced symlink with real file/directory)",
-                                    pkg, result.name
-                                ));
-                                pushed += 1;
-                            }
-                            Err(e) => {
-                                log::error(&format!(
-                                    "Failed to re-deploy {}:{}: {}",
-                                    pkg, result.name, e
-                                ));
-                                build_errors += 1;
-                            }
+            // Auto-redeploy when push will only change file types (replace
+            // unexpected symlinks with real files), no content edits. Two
+            // shapes: top-level symlink with matching content, OR a
+            // directory entry whose only drift is inner-file symlinks.
+            let top_level_symlink = !diff_result.has_changes
+                && target_is_unexpected_symlink(&result.target, result.is_symlink);
+            let inner_symlink_only = only_structural_symlink_changes(result);
+
+            if top_level_symlink || inner_symlink_only {
+                if ctx.dry_run {
+                    log::info_important(&format!(
+                        "[dry-run] {}:{} content matches but target is a symlink — would re-deploy",
+                        pkg, result.name
+                    ));
+                } else {
+                    match write_result(result, false) {
+                        Ok(()) => {
+                            log::success(&format!(
+                                "Re-deployed {}:{} (replaced symlink with real file/directory)",
+                                pkg, result.name
+                            ));
+                            pushed += 1;
+                        }
+                        Err(e) => {
+                            log::error(&format!(
+                                "Failed to re-deploy {}:{}: {}",
+                                pkg, result.name, e
+                            ));
+                            build_errors += 1;
                         }
                     }
-                } else if ctx.verbose {
+                }
+                continue;
+            }
+
+            if !diff_result.has_changes {
+                if ctx.verbose {
                     log::info(&format!("{}:{} in sync", pkg, result.name));
                 }
                 continue;
@@ -881,10 +933,22 @@ fn cmd_view(
                                             );
                                             has_changes = true;
                                         } else if f.has_changes {
+                                            let label = if f.target_is_symlink {
+                                                if f.diff_output.is_empty() {
+                                                    format!("{} (unexpected symlink)", rel)
+                                                } else {
+                                                    format!(
+                                                        "{} (unexpected symlink, modified)",
+                                                        rel
+                                                    )
+                                                }
+                                            } else {
+                                                format!("{}", rel)
+                                            };
                                             println!(
                                                 "    {} {}",
                                                 style("\u{2260}").yellow(),
-                                                style(&format!("{}", rel)).yellow()
+                                                style(label).yellow()
                                             );
                                             if !f.diff_output.is_empty() {
                                                 for line in f.diff_output.lines() {
@@ -902,8 +966,19 @@ fn cmd_view(
                                 }
                             } else if show_diff && !is_dir {
                                 let diff_result = compute_diff_for_result(result);
+                                let unexpected_sym =
+                                    target_is_unexpected_symlink(&result.target, result.is_symlink);
+                                if unexpected_sym {
+                                    annotations.push(
+                                        style("(symlinked, needs re-deploy)").yellow().to_string(),
+                                    );
+                                }
                                 if diff_result.has_changes {
-                                    println!("{}", file_header);
+                                    if annotations.is_empty() {
+                                        println!("{}", file_header);
+                                    } else {
+                                        println!("{} {}", file_header, annotations.join(" "));
+                                    }
                                     for line in diff_result.output.lines() {
                                         println!("    {}", line);
                                     }
@@ -912,13 +987,7 @@ fn cmd_view(
                                     annotations.push(style("(not deployed)").yellow().to_string());
                                     println!("{} {}", file_header, annotations.join(" "));
                                     has_changes = true;
-                                } else if target_is_unexpected_symlink(
-                                    &result.target,
-                                    result.is_symlink,
-                                ) {
-                                    annotations.push(
-                                        style("(symlinked, needs re-deploy)").yellow().to_string(),
-                                    );
+                                } else if unexpected_sym {
                                     println!("{} {}", file_header, annotations.join(" "));
                                     has_changes = true;
                                 } else if !short {
@@ -1190,11 +1259,23 @@ fn cmd_status(ctx: &Context) -> anyhow::Result<()> {
                                     )
                                 }
                             } else if target.exists() || target.symlink_metadata().is_ok() {
-                                // Check for unexpected symlink (stow leftover)
+                                // Check for unexpected symlink (stow leftover).
+                                // For directory entries, also walk the source dir
+                                // and detect per-file symlinks within the target,
+                                // since the directory itself can be a real dir
+                                // while inner files are still legacy symlinks.
+                                let pkg_dir = ctx.orders_dir.join(pkg);
                                 let unexpected_sym =
                                     target_is_unexpected_symlink(&target, file_entry.symlink);
+                                let inner_sym = !file_entry.symlink
+                                    && file_entry
+                                        .from_file
+                                        .as_ref()
+                                        .map(|f| pkg_dir.join(f))
+                                        .filter(|p| p.is_dir())
+                                        .is_some_and(|src| dir_has_inner_symlinks(&src, &target));
 
-                                if unexpected_sym {
+                                if unexpected_sym || inner_sym {
                                     (
                                         style(format!("{:<status_w$}", "symlinked"))
                                             .yellow()
@@ -1204,7 +1285,6 @@ fn cmd_status(ctx: &Context) -> anyhow::Result<()> {
                                             .to_string(),
                                     )
                                 } else {
-                                    let pkg_dir = ctx.orders_dir.join(pkg);
                                     let sync = check_file_sync(
                                         &pkg_dir,
                                         file_entry,
@@ -1306,12 +1386,14 @@ mod tests {
                 has_changes: false,
                 source_only: false,
                 diff_output: String::new(),
+                target_is_symlink: false,
             },
             FileDiffResult {
                 rel_path: PathBuf::from("b.txt"),
                 has_changes: false,
                 source_only: false,
                 diff_output: String::new(),
+                target_is_symlink: false,
             },
         ];
         let result = aggregate_dir_diff(&diffs);
@@ -1325,6 +1407,7 @@ mod tests {
             has_changes: true,
             source_only: false,
             diff_output: "diff".to_string(),
+            target_is_symlink: false,
         }];
         let result = aggregate_dir_diff(&diffs);
         assert!(result.has_changes);
@@ -1338,6 +1421,7 @@ mod tests {
             has_changes: true,
             source_only: true,
             diff_output: String::new(),
+            target_is_symlink: false,
         }];
         let result = aggregate_dir_diff(&diffs);
         let plain = console::strip_ansi_codes(&result.output);
@@ -1352,6 +1436,7 @@ mod tests {
             has_changes: true,
             source_only: false,
             diff_output: "line diff".to_string(),
+            target_is_symlink: false,
         }];
         let result = aggregate_dir_diff(&diffs);
         let plain = console::strip_ansi_codes(&result.output);
@@ -1366,6 +1451,83 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_dir_diff_unexpected_symlink_matching_content() {
+        // Inner-file symlink with matching resolved content: surface
+        // the type mismatch even though there is no textual diff.
+        let diffs = vec![FileDiffResult {
+            rel_path: PathBuf::from(".prototools"),
+            has_changes: true,
+            source_only: false,
+            diff_output: String::new(),
+            target_is_symlink: true,
+        }];
+        let result = aggregate_dir_diff(&diffs);
+        let plain = console::strip_ansi_codes(&result.output);
+        assert!(result.has_changes);
+        assert!(
+            plain.contains(".prototools") && plain.contains("unexpected symlink"),
+            "expected unexpected-symlink annotation, got:\n{plain}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_dir_diff_unexpected_symlink_with_content_diff() {
+        let diffs = vec![FileDiffResult {
+            rel_path: PathBuf::from(".prototools"),
+            has_changes: true,
+            source_only: false,
+            diff_output: "- old\n+ new".to_string(),
+            target_is_symlink: true,
+        }];
+        let result = aggregate_dir_diff(&diffs);
+        let plain = console::strip_ansi_codes(&result.output);
+        assert!(plain.contains("unexpected symlink"));
+        assert!(plain.contains("- old"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_has_inner_symlinks_detects_symlink_target() {
+        // Per-file detection: for directory entries we must walk into the
+        // target dir, not just check the dir's own type.
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let backing = TempDir::new().unwrap();
+        std::fs::write(source.path().join("file"), "x").unwrap();
+        std::fs::write(backing.path().join("file"), "x").unwrap();
+        std::os::unix::fs::symlink(backing.path().join("file"), target.path().join("file"))
+            .unwrap();
+        assert!(dir_has_inner_symlinks(source.path(), target.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_has_inner_symlinks_false_when_all_regular() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        std::fs::write(source.path().join("file"), "x").unwrap();
+        std::fs::write(target.path().join("file"), "x").unwrap();
+        assert!(!dir_has_inner_symlinks(source.path(), target.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_has_inner_symlinks_only_inspects_files_present_in_source() {
+        // A symlink that exists only in target (no source counterpart)
+        // is unmanaged by blend and must NOT trigger the warning, so the
+        // detection stays scoped to files originating from the order.
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let backing = TempDir::new().unwrap();
+        std::fs::write(source.path().join("managed"), "x").unwrap();
+        std::fs::write(target.path().join("managed"), "x").unwrap();
+        std::fs::write(backing.path().join("stray"), "y").unwrap();
+        std::os::unix::fs::symlink(backing.path().join("stray"), target.path().join("stray"))
+            .unwrap();
+        assert!(!dir_has_inner_symlinks(source.path(), target.path()));
+    }
+
+    #[test]
     fn test_aggregate_dir_diff_mixed_indicators() {
         let diffs = vec![
             FileDiffResult {
@@ -1373,18 +1535,21 @@ mod tests {
                 has_changes: true,
                 source_only: true,
                 diff_output: String::new(),
+                target_is_symlink: false,
             },
             FileDiffResult {
                 rel_path: PathBuf::from("modified.txt"),
                 has_changes: true,
                 source_only: false,
                 diff_output: "diff".to_string(),
+                target_is_symlink: false,
             },
             FileDiffResult {
                 rel_path: PathBuf::from("stable.txt"),
                 has_changes: false,
                 source_only: false,
                 diff_output: String::new(),
+                target_is_symlink: false,
             },
         ];
         let result = aggregate_dir_diff(&diffs);

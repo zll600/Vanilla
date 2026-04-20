@@ -1,6 +1,6 @@
 {
   blend = {
-    prefix = ["~/.config/test-json/"],
+    prefix = ["~/.config/json-format/"],
     files = [
       {
         name = "settings.json",

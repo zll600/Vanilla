@@ -48,6 +48,10 @@ pub struct FileDiffResult {
     pub diff_output: String,
     /// Whether the file only exists in the source (not yet deployed)
     pub source_only: bool,
+    /// Whether the deployed target is a symlink. Set even when resolved
+    /// content matches the source, so callers can flag legacy stow leftovers
+    /// that need to be replaced with a real file on the next sync.
+    pub target_is_symlink: bool,
 }
 
 /// Enumerate files in the source directory and compare each against the target.
@@ -86,9 +90,17 @@ pub fn diff_directory(
                 has_changes: true,
                 diff_output: String::new(),
                 source_only: true,
+                target_is_symlink: false,
             });
             continue;
         }
+
+        // Inspect the target file type without following symlinks. A target
+        // that is a symlink is structurally wrong (orders deploy real files)
+        // and must be flagged for redeploy regardless of resolved content.
+        let target_is_symlink = std::fs::symlink_metadata(&target_file)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
 
         // Both exist: compare contents
         let source_content = match std::fs::read_to_string(entry.path()) {
@@ -99,9 +111,10 @@ pub fn diff_directory(
                 let target_bytes = std::fs::read(&target_file).unwrap_or_default();
                 results.push(FileDiffResult {
                     rel_path,
-                    has_changes: source_bytes != target_bytes,
+                    has_changes: target_is_symlink || source_bytes != target_bytes,
                     diff_output: String::new(),
                     source_only: false,
+                    target_is_symlink,
                 });
                 continue;
             }
@@ -115,6 +128,7 @@ pub fn diff_directory(
                     has_changes: true,
                     diff_output: String::new(),
                     source_only: false,
+                    target_is_symlink,
                 });
                 continue;
             }
@@ -123,9 +137,10 @@ pub fn diff_directory(
         let diff = text_diff(&source_content, &target_content, ignore_patterns);
         results.push(FileDiffResult {
             rel_path,
-            has_changes: diff.has_changes,
+            has_changes: target_is_symlink || diff.has_changes,
             diff_output: diff.output,
             source_only: false,
+            target_is_symlink,
         });
     }
 
@@ -347,6 +362,63 @@ mod tests {
         let results = diff_directory(source.path(), &fake_target, &[]);
         assert_eq!(results.len(), 1);
         assert!(results[0].source_only);
+    }
+
+    /// Legacy stow leftover: target file is a symlink whose resolved content
+    /// matches the source. Even though contents agree, the deployed file's
+    /// type is wrong and a redeploy is required.
+    #[cfg(unix)]
+    #[test]
+    fn test_diff_directory_target_symlink_matching_content() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let backing = TempDir::new().unwrap();
+        write_file(source.path(), "config", "key=value\n");
+        write_file(backing.path(), "config", "key=value\n");
+        std::os::unix::fs::symlink(backing.path().join("config"), target.path().join("config"))
+            .unwrap();
+
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].target_is_symlink,
+            "target file is a symlink — must be flagged"
+        );
+        assert!(
+            results[0].has_changes,
+            "symlink target must be reported as needing redeploy even if resolved content matches"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_diff_directory_target_symlink_differing_content() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let backing = TempDir::new().unwrap();
+        write_file(source.path(), "config", "key=new\n");
+        write_file(backing.path(), "config", "key=old\n");
+        std::os::unix::fs::symlink(backing.path().join("config"), target.path().join("config"))
+            .unwrap();
+
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].target_is_symlink);
+        assert!(results[0].has_changes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_diff_directory_regular_target_not_marked_symlink() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        write_file(source.path(), "config", "key=value\n");
+        write_file(target.path(), "config", "key=value\n");
+
+        let results = diff_directory(source.path(), target.path(), &[]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].target_is_symlink);
+        assert!(!results[0].has_changes);
     }
 }
 

@@ -1,7 +1,7 @@
 let metadata = import "blend://metadata" in
 {
   blend = {
-    prefix = ["~/.config/test-if/"],
+    prefix = ["~/.config/if-then-else/"],
     files = [
       {
         name = "config.toml",

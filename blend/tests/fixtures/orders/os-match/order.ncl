@@ -1,7 +1,7 @@
 let metadata = import "blend://metadata" in
 {
   blend = {
-    prefix = ["~/.config/test-match/"],
+    prefix = ["~/.config/os-match/"],
     files = [
       {
         name = "config.toml",

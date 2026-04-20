@@ -1,6 +1,6 @@
 {
   blend = {
-    prefix = ["~/.config/test-multi/"],
+    prefix = ["~/.config/mixed-entries/"],
     files = [
       {
         name = "config.toml",

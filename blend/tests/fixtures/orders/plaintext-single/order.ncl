@@ -1,6 +1,6 @@
 {
   blend = {
-    prefix = ["~/.config/test-file/"],
+    prefix = ["~/.config/plaintext-single/"],
     files = [
       {
         name = "config.txt",
